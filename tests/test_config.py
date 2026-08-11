@@ -220,3 +220,18 @@ def test_admin_mode_can_be_disabled_and_hold_seconds_clamped(tmp_path):
     cfg = config_from_dict(data)
     assert cfg.admin_mode_enabled is False
     assert cfg.admin_hold_seconds == 15.0  # clamped to the max
+
+
+def test_gpu_context_defaults_to_drm_and_can_be_disabled(tmp_path):
+    make_show(tmp_path, "a", 1)
+    data = {"channels": [{"path": str(tmp_path / "a")}]}
+    cfg = config_from_dict(data)
+    assert cfg.gpu_context == "drm"
+
+    data["gpu_context"] = None
+    cfg = config_from_dict(data)
+    assert cfg.gpu_context is None
+
+    data["gpu_context"] = "x11"
+    cfg = config_from_dict(data)
+    assert cfg.gpu_context == "x11"

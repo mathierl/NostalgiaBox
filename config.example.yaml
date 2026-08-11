@@ -113,6 +113,12 @@ volume_step: 5            # how much each volume press changes it
 # for a TV you want HDMI. Run `nostalgiabox --list-audio` to see the names.
 # audio_device: "alsa/hdmi:CARD=vc4hdmi0,DEV=0"   # HDMI0 (use vc4hdmi1 for HDMI1)
 
+# mpv video output context. "drm" (the default) renders straight to the
+# framebuffer, which a headless Pi OS Lite boot needs to show a picture at all.
+# Only change this if you know you need to (e.g. testing on a desktop Linux box
+# with X11/Wayland running) - set it to null to let mpv auto-detect instead.
+# gpu_context: "drm"
+
 # Pressing volume-down once more when already at 0 cleanly powers off the Pi so
 # it's safe to unplug (needs the sudo rule from scripts/install-service.sh).
 power_off_on_min_volume: true

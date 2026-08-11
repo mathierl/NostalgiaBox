@@ -124,6 +124,7 @@ class TVApp:
                     fonts_dir=assets / "fonts",
                     force_4_3=config.force_4_3,
                     audio_device=config.audio_device,
+                    gpu_context=config.gpu_context,
                 )
 
         if input_manager is None:

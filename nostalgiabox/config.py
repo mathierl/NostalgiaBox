@@ -117,6 +117,12 @@ class Config:
     initial_volume: int = 70              # 0-100
     volume_step: int = 5
     audio_device: Optional[str] = None    # mpv audio device (e.g. HDMI); None = auto
+    # mpv's video output context. "drm" renders straight to the framebuffer via
+    # DRM/KMS, which is what a headless Pi OS Lite boot (no desktop/compositor)
+    # needs to actually show a picture at all. Set to null/None to fall back to
+    # mpv's own auto-detection (e.g. if you're running on a desktop with X11/
+    # Wayland instead of a bare Pi).
+    gpu_context: Optional[str] = "drm"
     # Press volume-down once more when already at 0 to cleanly power off the Pi
     # (so it's safe to unplug). The command run to shut down:
     power_off_on_min_volume: bool = True
@@ -302,6 +308,8 @@ def config_from_dict(data: Dict[str, Any], *, base_dir: Optional[Path] = None) -
     volume_step = _clamp_int(data.get("volume_step", 5), 1, 100, "volume_step")
     audio_device = data.get("audio_device")
     audio_device = str(audio_device) if audio_device else None
+    gpu_context = data.get("gpu_context", "drm")
+    gpu_context = str(gpu_context) if gpu_context else None
 
     poff_raw = data.get("power_off_command", ["sudo", "poweroff"])
     if isinstance(poff_raw, str):
@@ -329,6 +337,7 @@ def config_from_dict(data: Dict[str, Any], *, base_dir: Optional[Path] = None) -
         initial_volume=initial_volume,
         volume_step=volume_step,
         audio_device=audio_device,
+        gpu_context=gpu_context,
         power_off_on_min_volume=bool(data.get("power_off_on_min_volume", True)),
         power_off_command=power_off_command,
         scan_recursive=bool(data.get("scan_recursive", True)),

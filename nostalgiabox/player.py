@@ -121,6 +121,7 @@ class MpvPlayer(Player):
         fonts_dir: Optional[Path] = None,
         force_4_3: bool = True,
         audio_device: Optional[str] = None,
+        gpu_context: Optional[str] = "drm",
         extra_options: Optional[dict] = None,
     ) -> None:
         try:
@@ -162,9 +163,14 @@ class MpvPlayer(Player):
             # the moment the static ends (see play_transition).
             prefetch_playlist="yes",
             fullscreen=fullscreen,
-            # Hardware decode + a sensible video output for the Pi. gpu with the
-            # drm context works headless on the Pi 4; libmpv falls back sanely.
+            # Hardware decode + explicit headless video output. On a bare Pi OS
+            # Lite boot (no desktop/compositor running) mpv's own vo/gpu-context
+            # auto-detection does not reliably land on DRM/KMS - it can end up
+            # not rendering anything at all instead of falling back sanely, which
+            # leaves the console/login screen showing on the TV. Requesting the
+            # gpu vo with the drm context explicitly avoids that.
             hwdec=hwdec,
+            vo="gpu",
             # 4:3 shows should be pillarboxed (not stretched) inside the frame.
             keepaspect="yes",
             video_unscaled="no",
@@ -177,6 +183,8 @@ class MpvPlayer(Player):
             # Force audio to a specific output (e.g. HDMI) instead of mpv's
             # default (which can pick the 3.5mm jack on a Raspberry Pi).
             options["audio_device"] = audio_device
+        if gpu_context:
+            options["gpu_context"] = gpu_context
         if glsl_shaders:
             # CRT curvature/rounding/vignette/scanlines. Applied globally (always
             # on) so a newly-loaded episode is never shown for a frame or two
