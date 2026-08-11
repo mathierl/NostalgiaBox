@@ -81,6 +81,13 @@ class Player(ABC):
     @abstractmethod
     def set_mute(self, muted: bool) -> None: ...
 
+    def set_pause(self, paused: bool) -> None:
+        """Pause or resume playback in place (used by the admin view only).
+
+        The default implementation is a no-op; players that can actually
+        pause (see :class:`MpvPlayer`) override it.
+        """
+
     @abstractmethod
     def get_time_pos(self) -> Optional[float]:
         """Current playback position in seconds, or None if nothing is playing."""
@@ -314,6 +321,12 @@ class MpvPlayer(Player):
         except Exception:  # noqa: BLE001
             log.debug("could not set mute", exc_info=True)
 
+    def set_pause(self, paused: bool) -> None:
+        try:
+            self._mpv.pause = bool(paused)
+        except Exception:  # noqa: BLE001
+            log.debug("could not set pause", exc_info=True)
+
     def get_time_pos(self) -> Optional[float]:
         try:
             pos = self._mpv.time_pos
@@ -365,6 +378,7 @@ class MockPlayer(Player):
         self.looping: Optional[Path] = None
         self.volume: int = 0
         self.muted: bool = False
+        self.paused: bool = False
         self.time_pos: float = 0.0
         self.closed = False
         # Recorded history, handy for assertions in tests.
@@ -437,6 +451,10 @@ class MockPlayer(Player):
     def set_mute(self, muted: bool) -> None:
         self.muted = bool(muted)
         self._log(f"MUTE {self.muted}")
+
+    def set_pause(self, paused: bool) -> None:
+        self.paused = bool(paused)
+        self._log(f"PAUSE {self.paused}")
 
     def get_time_pos(self) -> Optional[float]:
         return self.time_pos if self.current is not None else None

@@ -132,6 +132,12 @@ class Config:
     # Options for the input backends (see input/manager.create_backends).
     input_options: Mapping[str, Any] = field(default_factory=dict)
 
+    # Admin/developer view: a hidden screen (all channels + episode counts,
+    # plus pause/play) reached by holding the power button. Meant for the
+    # grown-ups; the kid-facing remote experience is unchanged either way.
+    admin_mode_enabled: bool = True
+    admin_hold_seconds: float = 3.0  # how long to hold power to trigger it
+
     def channel_numbers(self) -> List[int]:
         return [c.number for c in self.channels]
 
@@ -329,6 +335,10 @@ def config_from_dict(data: Dict[str, Any], *, base_dir: Optional[Path] = None) -
         shuffle_seed=(int(data["shuffle_seed"]) if data.get("shuffle_seed") is not None else None),
         assets_dir=assets_dir,
         input_options=dict(data.get("input") or {}),
+        admin_mode_enabled=bool(data.get("admin_mode_enabled", True)),
+        admin_hold_seconds=_clamp_float(
+            data.get("admin_hold_seconds", 3.0), 0.5, 15.0, "admin_hold_seconds"
+        ),
     )
 
 

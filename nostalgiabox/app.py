@@ -63,6 +63,11 @@ class TVApp:
         self.muted = False
         self.standby = False
         self.powered_off = False
+        # Admin/developer view: hidden behind a long power-button hold (see
+        # input/keyboard.py). Grown-ups get an overview of every channel and
+        # pause/play; the kid-facing remote is unaffected either way.
+        self.admin_mode = False
+        self.paused = False
         self._playing_path: Optional[Path] = None
         self._last_channel_number: Optional[int] = None
         self._running = False
@@ -125,7 +130,12 @@ class TVApp:
             if dry_run:
                 backends = create_backends({"keyboard": False, "cec": False, "stdin": True})
             else:
-                backends = create_backends(config.input_options)
+                backends = create_backends(
+                    config.input_options,
+                    admin_hold_seconds=(
+                        config.admin_hold_seconds if config.admin_mode_enabled else None
+                    ),
+                )
             input_manager = InputManager(backends)
 
         return cls(config, player, input_manager, assets_dir=assets_dir)
@@ -212,6 +222,7 @@ class TVApp:
             Action.INFO: self._show_info,
             Action.LAST_CHANNEL: self._jump_last_channel,
             Action.ENTER: self._confirm_digits,
+            Action.ADMIN_TOGGLE: self._toggle_admin_mode,
         }
         if action == Action.DIGIT:
             self._push_digit(event.value or 0)
@@ -265,11 +276,14 @@ class TVApp:
 
         request = channel.tune_in()
         self._pending_banner = None
+        if self.admin_mode:
+            self.paused = False
 
         if request is None:
             # No episodes on this channel: show the "no signal" screen.
             self.overlay.show_channel_bug(channel.number, channel.name)
             self._show_no_signal(channel)
+            self._refresh_admin_panel()
             return
 
         if not show_static:
@@ -300,6 +314,8 @@ class TVApp:
             self._switch_deadline = None
             self.overlay.show_channel_bug(channel.number, channel.name)
             self._play_request(request)
+
+        self._refresh_admin_panel()
 
     def _play_request(self, request: PlayRequest) -> None:
         self._playing_path = request.path
@@ -361,9 +377,35 @@ class TVApp:
             log.exception("power-off command failed: %s", command)
 
     def _toggle_mute(self) -> None:
+        # In the admin view, the Mute button is repurposed as pause/play (a
+        # capability the kid-facing remote never exposes). Everywhere else it
+        # behaves exactly as before.
+        if self.admin_mode:
+            self._toggle_pause()
+            return
         self.muted = not self.muted
         self.player.set_mute(self.muted)
         self.overlay.show_volume(self.volume, self.muted)
+
+    # -- admin/developer view -------------------------------------------------
+    def _toggle_admin_mode(self) -> None:
+        self.admin_mode = not self.admin_mode
+        if self.admin_mode:
+            self._refresh_admin_panel()
+        else:
+            if self.paused:
+                self._toggle_pause()
+            self.overlay.clear_admin_panel()
+            self._show_info()
+
+    def _refresh_admin_panel(self) -> None:
+        if self.admin_mode:
+            self.overlay.show_admin_panel(self.lineup, paused=self.paused)
+
+    def _toggle_pause(self) -> None:
+        self.paused = not self.paused
+        self.player.set_pause(self.paused)
+        self._refresh_admin_panel()
 
     # -- info / standby -----------------------------------------------------
     def _show_info(self) -> None:
@@ -376,6 +418,10 @@ class TVApp:
             self._remember_position()
             self._switch_deadline = None
             self._pending_banner = None
+            # Standby is the kid-proof reset point: never leave the box
+            # sitting in admin mode / paused underneath a blanked screen.
+            self.admin_mode = False
+            self.paused = False
             self.player.stop()
             self.overlay.clear_all()
             self.overlay.show_standby()

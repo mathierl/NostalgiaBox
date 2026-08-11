@@ -27,6 +27,7 @@ class Action(Enum):
     INFO = auto()           # re-show the channel banner
     LAST_CHANNEL = auto()   # jump back to the previously watched channel
     POWER = auto()          # toggle standby (blank screen)
+    ADMIN_TOGGLE = auto()   # secret trigger: toggle the admin/developer view
     QUIT = auto()           # shut the application down entirely
 
 

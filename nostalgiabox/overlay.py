@@ -19,6 +19,7 @@ from __future__ import annotations
 import time
 from typing import Callable, Dict, Optional
 
+from .channel import ChannelLineup
 from .config import Config, UiConfig
 from .player import Player
 
@@ -47,6 +48,7 @@ _ID_CHANNEL = 1
 _ID_VOLUME = 2
 _ID_STANDBY = 3
 _ID_MESSAGE = 4
+_ID_ADMIN = 5
 
 _BLACK = "&H00000000"
 
@@ -92,6 +94,19 @@ class OverlayManager:
         self._player.set_overlay(_ID_MESSAGE, ass, CANVAS_W, CANVAS_H)
         self._arm(_ID_MESSAGE, dur)
 
+    def show_admin_panel(self, lineup: "ChannelLineup", *, paused: bool) -> None:
+        """Persistent grown-ups-only overlay: every channel, its episode
+        count, and the current pause state. Reached by holding Power; see
+        :class:`nostalgiabox.app.TVApp`.
+        """
+        ass = _admin_panel_ass(lineup, paused, self._ui)
+        self._player.set_overlay(_ID_ADMIN, ass, CANVAS_W, CANVAS_H)
+        self._expiry.pop(_ID_ADMIN, None)  # persistent until cleared
+
+    def clear_admin_panel(self) -> None:
+        self._player.clear_overlay(_ID_ADMIN)
+        self._expiry.pop(_ID_ADMIN, None)
+
     def show_standby(self) -> None:
         """Persistent 'standby' notice for when the box is 'off'."""
         ass = _standby_ass(self._ui)
@@ -111,7 +126,7 @@ class OverlayManager:
                 self._expiry.pop(overlay_id, None)
 
     def clear_all(self) -> None:
-        for overlay_id in (_ID_CHANNEL, _ID_VOLUME, _ID_STANDBY, _ID_MESSAGE):
+        for overlay_id in (_ID_CHANNEL, _ID_VOLUME, _ID_STANDBY, _ID_MESSAGE, _ID_ADMIN):
             self._player.clear_overlay(overlay_id)
         self._expiry.clear()
 
@@ -200,6 +215,28 @@ def _message_ass(text: str, ui: UiConfig) -> str:
 
 def _standby_ass(ui: UiConfig) -> str:
     return rf"{{\an5\pos({_FRAME_CX},{CANVAS_H // 2}){_style(ui, size=72)}}}STANDBY"
+
+
+def _admin_panel_ass(lineup: "ChannelLineup", paused: bool, ui: UiConfig) -> str:
+    """A small, dense readout in the top-left: every channel with its episode
+    count (current channel marked with '>'), plus the pause state - the
+    grown-ups-only overview the kid remote never shows.
+    """
+    current = lineup.current.number
+    lines = [f"{'PAUSED' if paused else 'ADMIN'}"]
+    for channel in lineup:
+        marker = ">" if channel.number == current else " "
+        count = len(channel.episodes)
+        ep_label = "ep" if count == 1 else "eps"
+        lines.append(
+            f"{marker}CH {channel.number:02d}  {channel.name}  ({count} {ep_label})"
+        )
+    row_h = 34
+    parts = []
+    for i, text in enumerate(lines):
+        y = _IY0 + i * row_h
+        parts.append(rf"{{\an7\pos({_IX0},{y}){_style(ui, size=28)}}}{_escape(text)}")
+    return "\n".join(parts)
 
 
 def _filled_rect(*, x: float, y: float, w: float, h: float, fill: str) -> str:

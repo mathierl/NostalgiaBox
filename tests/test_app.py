@@ -289,3 +289,88 @@ def test_resume_mode_restarts_where_left(tmp_path):
     send(app, Action.CHANNEL_DOWN)  # back to ch 2 -> resume at 42
     assert player.current == playing
     assert player.played[-1] == (playing, 42.0)
+
+
+# -- admin/developer view ---------------------------------------------------
+# The secret trigger itself (a long power-button hold) is detected in the
+# evdev keyboard backend, which needs real hardware libraries to import and
+# is intentionally untested here (see tests/test_keymap.py for the pure
+# key-mapping pieces). These tests drive the app the same way that backend
+# would: by delivering the Action.ADMIN_TOGGLE event it emits on release.
+
+
+def test_admin_toggle_shows_panel_listing_all_channels(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    assert not app.admin_mode
+    send(app, Action.ADMIN_TOGGLE)
+    assert app.admin_mode
+    panel = player.overlays.get(5, "")
+    assert "Dragon Tales" in panel and "Arthur" in panel and "Rugrats" in panel
+    assert "(4 eps)" in panel
+
+
+def test_admin_toggle_off_by_default_mute_still_mutes(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.MUTE)
+    assert player.muted is True
+    assert player.paused is False  # untouched: mute is still just mute
+
+
+def test_mute_becomes_pause_play_in_admin_mode(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)
+    assert app.paused is True
+    assert player.paused is True
+    assert player.muted is False  # never touched the real mute
+    send(app, Action.MUTE)
+    assert app.paused is False
+    assert player.paused is False
+
+
+def test_exiting_admin_mode_unpauses_and_clears_panel(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # pause
+    assert app.paused
+    send(app, Action.ADMIN_TOGGLE)  # exit admin mode
+    assert not app.admin_mode
+    assert not app.paused
+    assert player.paused is False
+    assert 5 not in player.overlays  # admin panel cleared
+
+
+def test_changing_channel_in_admin_mode_unpauses_and_refreshes_panel(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # pause on channel 2
+    assert app.paused
+    send(app, Action.CHANNEL_UP)  # flip to channel 3
+    assert not app.paused  # fresh channel: no longer paused
+    assert "CH 03" in player.overlays.get(5, "") or "> CH 03" in player.overlays.get(5, "")
+
+
+def test_admin_toggle_ignored_while_in_standby(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.POWER)  # enter standby
+    assert app.standby
+    send(app, Action.ADMIN_TOGGLE)
+    assert not app.admin_mode  # blocked, same as every other action in standby
+
+
+def test_entering_standby_resets_admin_mode_and_pause(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # pause
+    assert app.admin_mode and app.paused
+    send(app, Action.POWER)  # standby
+    assert not app.admin_mode
+    assert not app.paused
+    assert 5 not in player.overlays

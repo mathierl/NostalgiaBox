@@ -122,3 +122,66 @@ def test_overlay_uses_configured_font_and_color(tmp_path):
     ass = player.overlays[1]
     assert "\\fnVT323" in ass          # bundled retro font
     assert "&H005AFF4D" in ass         # #4DFF5A -> ASS BBGGRR
+
+
+def test_admin_panel_lists_channels_and_episode_counts(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "a", 1)
+    make_show(tmp_path, "b", 3)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [
+                {"number": 3, "name": "Arthur", "path": str(tmp_path / "a")},
+                {"number": 4, "name": "Bugs", "path": str(tmp_path / "b")},
+            ],
+        }
+    )
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_panel(lineup, paused=False)
+    ass = player.overlays[5]
+    assert "Arthur" in ass and "Bugs" in ass
+    assert "(1 ep)" in ass  # channel "a" has 1 episode (singular)
+    assert "(3 eps)" in ass  # channel "b" has 3 episodes
+
+
+def test_admin_panel_shows_paused_state(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    config = _config(tmp_path)
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_panel(lineup, paused=True)
+    assert "PAUSED" in player.overlays[5]
+
+
+def test_admin_panel_persists_and_clears(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    config = _config(tmp_path)
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    clock = FakeClock()
+    om = OverlayManager(player, config, clock=clock)
+    om.show_admin_panel(lineup, paused=False)
+    clock.advance(10_000)
+    om.tick()
+    assert 5 in player.overlays  # persistent, no expiry
+    om.clear_admin_panel()
+    assert 5 not in player.overlays
+
+
+def test_clear_all_also_clears_admin_panel(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    config = _config(tmp_path)
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_panel(lineup, paused=False)
+    om.clear_all()
+    assert 5 not in player.overlays

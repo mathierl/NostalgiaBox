@@ -11,15 +11,17 @@ from __future__ import annotations
 
 import logging
 import select
+import time
 from typing import Dict, List, Optional, Sequence
 
-from ..actions import InputEvent
+from ..actions import Action, InputEvent
 from .base import InputBackend
 from .keymap import evdev_key_to_event
 
 log = logging.getLogger(__name__)
 
 # Key-event values reported by evdev: 0=up, 1=down, 2=autorepeat.
+_KEY_UP = 0
 _KEY_DOWN = 1
 _KEY_REPEAT = 2
 
@@ -37,6 +39,7 @@ class KeyboardBackend(InputBackend):
         grab: bool = False,
         allow_repeat: bool = True,
         overrides: Optional[Dict[str, Optional[InputEvent]]] = None,
+        admin_hold_seconds: Optional[float] = None,
     ) -> None:
         super().__init__()
         self._device_paths = list(device_paths) if device_paths else None
@@ -46,6 +49,13 @@ class KeyboardBackend(InputBackend):
         # Per-key action overrides from config (key name -> InputEvent or None).
         self._overrides = dict(overrides or {})
         self._devices: List = []
+        # Long-press detection for the secret admin/developer view: how long
+        # (seconds) a key mapped to Action.POWER must be held for release to
+        # fire ADMIN_TOGGLE instead of the normal power toggle. None disables
+        # the feature entirely (a short press always toggles standby, as before).
+        self._admin_hold_seconds = admin_hold_seconds
+        self._power_down_key: Optional[str] = None
+        self._power_down_at: Optional[float] = None
 
     def _lookup(self, key_name: str) -> Optional[InputEvent]:
         """Config overrides win over the built-in defaults."""
@@ -122,6 +132,37 @@ class KeyboardBackend(InputBackend):
     def _handle_key_event(self, event) -> None:
         from evdev import ecodes
 
+        key_name = _code_to_name(ecodes.KEY, event.code)
+        if key_name is None:
+            return
+        input_event = self._lookup(key_name)
+        if input_event is None:
+            return
+
+        # Long-press handling for the power button: rather than acting the
+        # instant it's pressed, wait for release and look at how long it was
+        # held. A normal press still toggles standby exactly as before; a
+        # hold past the configured threshold instead fires the secret
+        # admin/developer-view trigger. Timing is done off real press/release
+        # events rather than autorepeat, so it works even on remotes whose
+        # driver doesn't emit repeats for this key.
+        if input_event.action is Action.POWER and self._admin_hold_seconds is not None:
+            if event.value == _KEY_DOWN:
+                self._power_down_key = key_name
+                self._power_down_at = time.monotonic()
+                return
+            if event.value == _KEY_UP:
+                if key_name == self._power_down_key and self._power_down_at is not None:
+                    held = time.monotonic() - self._power_down_at
+                    self._power_down_key = None
+                    self._power_down_at = None
+                    if held >= self._admin_hold_seconds:
+                        self.emit(InputEvent(Action.ADMIN_TOGGLE))
+                    else:
+                        self.emit(input_event)
+                return
+            return  # ignore autorepeat while timing a power hold
+
         if event.value == _KEY_DOWN:
             pass
         elif event.value == _KEY_REPEAT and self._allow_repeat:
@@ -129,16 +170,8 @@ class KeyboardBackend(InputBackend):
         else:
             return  # key-up, or repeats when disabled
 
-        key_name = _code_to_name(ecodes.KEY, event.code)
-        if key_name is None:
-            return
-        input_event = self._lookup(key_name)
-        if input_event is None:
-            return
         # Only volume/channel keys should auto-repeat when held; ignore repeats
         # for digits, enter, power, etc. so a held button doesn't misbehave.
-        from ..actions import Action
-
         if event.value == _KEY_REPEAT and input_event.action not in (
             Action.VOLUME_UP,
             Action.VOLUME_DOWN,

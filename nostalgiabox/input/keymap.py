@@ -58,6 +58,11 @@ _EVDEV_ACTIONS: Dict[str, InputEvent] = {
     "KEY_POWER": InputEvent(Action.POWER),
     "KEY_SLEEP": InputEvent(Action.POWER),
     "KEY_P": InputEvent(Action.POWER),
+    # Admin/developer view. Real remotes reach this by holding the power
+    # button (see KeyboardBackend's long-press handling, keyed off this same
+    # POWER mapping) - KEY_A exists only as a dev/keyboard/--dry-run shortcut
+    # so it can be toggled instantly without a timed hold.
+    "KEY_A": InputEvent(Action.ADMIN_TOGGLE),
     # Quit the application (mostly for keyboards during setup).
     "KEY_ESC": InputEvent(Action.QUIT),
     "KEY_Q": InputEvent(Action.QUIT),
@@ -88,6 +93,8 @@ _ACTION_BY_NAME: Dict[str, InputEvent] = {
     "last_channel": InputEvent(Action.LAST_CHANNEL),
     "last": InputEvent(Action.LAST_CHANNEL),
     "power": InputEvent(Action.POWER),
+    "admin_toggle": InputEvent(Action.ADMIN_TOGGLE),
+    "admin": InputEvent(Action.ADMIN_TOGGLE),
     "quit": InputEvent(Action.QUIT),
     "none": None,  # explicitly unbind a key
 }
@@ -143,6 +150,8 @@ _CHAR_TO_KEY: Dict[str, str] = {
     "L": "KEY_LAST",
     "p": "KEY_POWER",
     "P": "KEY_POWER",
+    "a": "KEY_A",
+    "A": "KEY_A",
     "q": "KEY_Q",
     "Q": "KEY_Q",
     "\r": "KEY_ENTER",

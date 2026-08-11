@@ -99,3 +99,26 @@ def test_cec_keys():
     assert cec_key_to_event("number 4").value == 4
     assert cec_key_to_event("power").action == Action.POWER
     assert cec_key_to_event("nonsense") is None
+
+
+def test_admin_toggle_key_and_dev_shortcut():
+    # KEY_A exists only as a --dry-run / keyboard dev shortcut; the real
+    # trigger on physical remotes is a long hold of the power button,
+    # detected inside KeyboardBackend (untested here - needs evdev).
+    assert evdev_key_to_event("KEY_A").action == Action.ADMIN_TOGGLE
+    assert stdin_char_to_event("a").action == Action.ADMIN_TOGGLE
+    assert stdin_char_to_event("A").action == Action.ADMIN_TOGGLE
+
+
+def test_parse_key_overrides_admin_toggle():
+    ov = parse_key_overrides({"KEY_F6": "admin_toggle"})
+    assert ov["KEY_F6"].action == Action.ADMIN_TOGGLE
+
+
+def test_keyboard_backend_accepts_admin_hold_seconds():
+    from nostalgiabox.input.keyboard import KeyboardBackend
+
+    kb = KeyboardBackend(admin_hold_seconds=3.0)
+    assert kb._admin_hold_seconds == 3.0
+    kb_default = KeyboardBackend()
+    assert kb_default._admin_hold_seconds is None

@@ -57,8 +57,14 @@ class InputManager:
         self._started = False
 
 
-def create_backends(options: Optional[Dict] = None) -> List[InputBackend]:
+def create_backends(
+    options: Optional[Dict] = None, *, admin_hold_seconds: Optional[float] = None
+) -> List[InputBackend]:
     """Build the list of input backends from the config ``input:`` options.
+
+    ``admin_hold_seconds``, when set, is forwarded to the keyboard/evdev
+    backend so it can detect a long-press of the power button as the secret
+    trigger for the admin/developer view. ``None`` disables that detection.
 
     Recognised options (all optional)::
 
@@ -93,6 +99,7 @@ def create_backends(options: Optional[Dict] = None) -> List[InputBackend]:
                     name_filter=options.get("keyboard_name_filter"),
                     grab=bool(options.get("keyboard_grab", False)),
                     overrides=overrides,
+                    admin_hold_seconds=admin_hold_seconds,
                 )
             )
         else:

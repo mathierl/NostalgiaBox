@@ -8,7 +8,9 @@ few seconds in, like you just tuned in); when an episode ends, the next one roll
 automatically on an endless shuffle. It boots straight to the TV on power-up, is
 driven by a simple remote, sends audio over HDMI, and has an authentic
 early-2000s vibe — a green on-screen channel banner and volume bar, and a curved
-"CRT" picture. No menus, no apps, no touchscreens. Just a remote and channels.
+"CRT" picture. No menus, no apps, no touchscreens. Just a remote and channels. Grown-ups get
+a hidden admin view (hold Power) with a full channel overview and pause/play -
+kids never see it.
 
 This guide has two parts:
 
@@ -248,8 +250,30 @@ Kids will unplug it. Two things keep the SD card from getting corrupted:
 | Mute | Mute |
 | Standby (blank screen) | Power |
 | **Turn off** (safe to unplug) | Volume-down again when already at 0 |
+| **Admin/developer view** (grown-ups only) | Hold Power for ~3 seconds |
 
 Turn it on by plugging in power; it boots back to a channel automatically.
+
+### Admin/developer view
+
+Holding **Power** for about 3 seconds (instead of a quick press, which just
+toggles standby) opens a hidden overlay meant for adults: every channel with
+its episode count, and the current channel marked, drawn small in the corner
+so the show keeps playing underneath. While it's open, the **Mute** button is
+repurposed as **pause/play** - a control the kid-facing remote never exposes,
+since a small kid pausing the TV mid-show tends to end in tears. Hold Power
+again to close it (this also un-pauses if you left it paused).
+
+A couple of notes:
+
+- It only works while a channel is on screen - not from standby, and putting
+  the box into standby closes the admin view and un-pauses first, so a kid
+  power-cycling the box can never get stuck on a paused screen.
+- Turn it off entirely with `admin_mode_enabled: false` in `config.yaml`, or
+  change how long the hold needs to be with `admin_hold_seconds` (default
+  `3.0`).
+- In `--dry-run` dev mode on a laptop keyboard, press **a** instead of timing
+  a hold.
 
 ---
 
@@ -280,6 +304,8 @@ transition: none         # channel-change effect: none | glitch | static
 bridge_seconds: 0.8      # keep the current show playing while the next loads
 channel_bug_seconds: 4   # how long the channel banner lingers
 initial_volume: 70       # 0-100
+admin_mode_enabled: true # hidden grown-ups view (channel overview + pause/play)
+admin_hold_seconds: 3.0  # how long to hold Power to open it
 audio_device: "..."      # force HDMI audio (see Part H)
 
 ui:                      # the green on-screen display
