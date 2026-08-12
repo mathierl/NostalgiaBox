@@ -257,18 +257,29 @@ Turn it on by plugging in power; it boots back to a channel automatically.
 ### Admin/developer view
 
 Holding **Power** for about 3 seconds (instead of a quick press, which just
-toggles standby) opens a hidden overlay meant for adults: every channel with
-its episode count, and the current channel marked, drawn small in the corner
-so the show keeps playing underneath. While it's open, the **Mute** button is
-repurposed as **pause/play** - a control the kid-facing remote never exposes,
-since a small kid pausing the TV mid-show tends to end in tears. Hold Power
-again to close it (this also un-pauses if you left it paused).
+toggles standby) opens a hidden screen meant for adults: a full-screen
+**SELECT A CHANNEL** grid listing every channel and its episode count, with
+the current one highlighted. From there:
+
+- **Channel Up/Down** moves the highlighted selection (this does *not* change
+  the channel yet - it's just scrolling through the list).
+- **Mute** confirms the highlighted channel and tunes to it, which also closes
+  the grid back down to a small corner readout so the show keeps playing.
+- **Hold Power** again at any point to close the admin view entirely.
+
+Once you've confirmed a channel and the grid has closed, **Mute** switches
+roles again and becomes **pause/play** - a control the kid-facing remote never
+exposes, since a small kid pausing the TV mid-show tends to end in tears.
+**Channel Up/Down** also switches back to changing the channel immediately
+(as normal) once you're out of the grid. To browse again, hold Power to close
+admin mode, then hold it again to reopen the grid.
 
 A couple of notes:
 
 - It only works while a channel is on screen - not from standby, and putting
-  the box into standby closes the admin view and un-pauses first, so a kid
-  power-cycling the box can never get stuck on a paused screen.
+  the box into standby closes the admin view (grid or not) and un-pauses
+  first, so a kid power-cycling the box can never get stuck on a paused or
+  half-browsed screen.
 - Turn it off entirely with `admin_mode_enabled: false` in `config.yaml`, or
   change how long the hold needs to be with `admin_hold_seconds` (default
   `3.0`).

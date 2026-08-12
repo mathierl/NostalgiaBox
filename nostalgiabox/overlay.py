@@ -103,7 +103,22 @@ class OverlayManager:
         self._player.set_overlay(_ID_ADMIN, ass, CANVAS_W, CANVAS_H)
         self._expiry.pop(_ID_ADMIN, None)  # persistent until cleared
 
+    def show_admin_browser(
+        self, lineup: "ChannelLineup", *, highlight_number: Optional[int]
+    ) -> None:
+        """Full-screen 'pick a channel' grid: every channel, its episode
+        count, and the highlighted one picked out in the bright UI colour
+        (everything else dimmed). This is what admin mode opens into; see
+        :class:`nostalgiabox.app.TVApp`.
+        """
+        ass = _admin_browser_ass(lineup, highlight_number, self._ui)
+        self._player.set_overlay(_ID_ADMIN, ass, CANVAS_W, CANVAS_H)
+        self._expiry.pop(_ID_ADMIN, None)  # persistent until cleared
+
     def clear_admin_panel(self) -> None:
+        # Clears whichever admin view is currently up - the browse grid and
+        # the corner panel share one overlay slot since only one is ever
+        # shown at a time.
         self._player.clear_overlay(_ID_ADMIN)
         self._expiry.pop(_ID_ADMIN, None)
 
@@ -160,6 +175,15 @@ def _style(ui: UiConfig, *, size: int, alpha: int = 0) -> str:
     else:
         tags += rf"\bord2\3c{_BLACK}\shad0"
     return tags
+
+
+def _dim_style(ui: UiConfig, *, size: int) -> str:
+    """Like :func:`_style` but in the unlit/dim colour and no glow - used for
+    the non-highlighted rows of the admin browse grid so the selected row
+    reads clearly against the rest of the list.
+    """
+    color = _hex_to_ass(ui.dim_color)
+    return rf"\fn{ui.font}\b1\fs{size}\c{color}\1a&H00&\bord2\3c{_BLACK}\shad0"
 
 
 # --------------------------------------------------------------------------
@@ -236,6 +260,39 @@ def _admin_panel_ass(lineup: "ChannelLineup", paused: bool, ui: UiConfig) -> str
     for i, text in enumerate(lines):
         y = _IY0 + i * row_h
         parts.append(rf"{{\an7\pos({_IX0},{y}){_style(ui, size=28)}}}{_escape(text)}")
+    return "\n".join(parts)
+
+
+def _admin_browser_ass(
+    lineup: "ChannelLineup", highlight_number: Optional[int], ui: UiConfig
+) -> str:
+    """The full-screen 'SELECT A CHANNEL' grid admin mode opens into: a
+    header, one row per channel (episode count included, highlighted one
+    bright, the rest dimmed), and a footer reminding what the buttons do.
+    """
+    header = "SELECT A CHANNEL"
+    footer = "MUTE = SELECT      HOLD POWER = EXIT"
+    rows = []
+    for channel in lineup:
+        count = len(channel.episodes)
+        ep_label = "ep" if count == 1 else "eps"
+        rows.append(
+            (channel.number, f"CH {channel.number:02d}   {channel.name}   ({count} {ep_label})")
+        )
+
+    row_h = 60
+    block_h = len(rows) * row_h
+    start_y = max(_IY0 + 90, (_IY0 + _IY1) // 2 - block_h // 2)
+
+    parts = [rf"{{\an8\pos({_FRAME_CX},{_IY0}){_style(ui, size=44)}}}{_escape(header)}"]
+    for i, (number, text) in enumerate(rows):
+        y = start_y + i * row_h
+        selected = number == highlight_number
+        size = 40 if selected else 32
+        label = ("> " if selected else "  ") + text
+        style = _style(ui, size=size) if selected else _dim_style(ui, size=size)
+        parts.append(rf"{{\an5\pos({_FRAME_CX},{y}){style}}}{_escape(label)}")
+    parts.append(rf"{{\an2\pos({_FRAME_CX},{_IY1}){_style(ui, size=26)}}}{_escape(footer)}")
     return "\n".join(parts)
 
 

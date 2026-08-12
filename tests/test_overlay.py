@@ -185,3 +185,42 @@ def test_clear_all_also_clears_admin_panel(tmp_path):
     om.show_admin_panel(lineup, paused=False)
     om.clear_all()
     assert 5 not in player.overlays
+
+
+def test_admin_browser_highlights_selected_channel(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "b", 3)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [
+                {"number": 3, "name": "Arthur", "path": str(tmp_path / "a")},
+                {"number": 4, "name": "Bugs", "path": str(tmp_path / "b")},
+            ],
+        }
+    )
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_browser(lineup, highlight_number=4)
+    ass = om._player.overlays[5]
+    assert "SELECT A CHANNEL" in ass
+    assert "> CH 04   Bugs" in ass  # highlighted row gets the marker
+    assert "  CH 03   Arthur" in ass  # non-highlighted row doesn't
+    assert "MUTE = SELECT" in ass
+
+
+def test_admin_browser_and_panel_share_overlay_slot(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    config = _config(tmp_path)
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_browser(lineup, highlight_number=3)
+    assert "SELECT A CHANNEL" in player.overlays[5]
+    om.show_admin_panel(lineup, paused=False)
+    assert "SELECT A CHANNEL" not in player.overlays[5]  # replaced, not stacked
+    om.clear_admin_panel()
+    assert 5 not in player.overlays

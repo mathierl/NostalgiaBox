@@ -68,6 +68,12 @@ class TVApp:
         # pause/play; the kid-facing remote is unaffected either way.
         self.admin_mode = False
         self.paused = False
+        # True while the full-screen "SELECT A CHANNEL" browse grid is up
+        # (entered automatically when admin mode opens). Channel Up/Down move
+        # a highlight cursor instead of actually changing the channel while
+        # this is True; Mute confirms and tunes to the highlighted channel.
+        self.admin_browsing = False
+        self._browse_number: Optional[int] = None
         self._playing_path: Optional[Path] = None
         self._last_channel_number: Optional[int] = None
         self._running = False
@@ -234,12 +240,18 @@ class TVApp:
 
     # -- channel changing ---------------------------------------------------
     def _channel_up(self) -> None:
+        if self.admin_browsing:
+            self._move_browse_cursor(1)
+            return
         self._remember_position()
         self._last_channel_number = self.lineup.current.number
         self.lineup.up()
         self.tune_current()
 
     def _channel_down(self) -> None:
+        if self.admin_browsing:
+            self._move_browse_cursor(-1)
+            return
         self._remember_position()
         self._last_channel_number = self.lineup.current.number
         self.lineup.down()
@@ -378,9 +390,13 @@ class TVApp:
             log.exception("power-off command failed: %s", command)
 
     def _toggle_mute(self) -> None:
-        # In the admin view, the Mute button is repurposed as pause/play (a
+        # In the admin view, Mute is repurposed: while the browse grid is up
+        # it confirms the highlighted channel, otherwise it's pause/play (a
         # capability the kid-facing remote never exposes). Everywhere else it
         # behaves exactly as before.
+        if self.admin_browsing:
+            self._confirm_browse_selection()
+            return
         if self.admin_mode:
             self._toggle_pause()
             return
@@ -392,16 +408,45 @@ class TVApp:
     def _toggle_admin_mode(self) -> None:
         self.admin_mode = not self.admin_mode
         if self.admin_mode:
+            # Opening admin mode always lands on the full-screen "pick a
+            # channel" browse grid, cursor starting on whatever's playing.
+            self.admin_browsing = True
+            self._browse_number = self.lineup.current.number
             self._refresh_admin_panel()
         else:
+            self.admin_browsing = False
+            self._browse_number = None
             if self.paused:
                 self._toggle_pause()
             self.overlay.clear_admin_panel()
             self._show_info()
 
     def _refresh_admin_panel(self) -> None:
-        if self.admin_mode:
+        if not self.admin_mode:
+            return
+        if self.admin_browsing:
+            self.overlay.show_admin_browser(self.lineup, highlight_number=self._browse_number)
+        else:
             self.overlay.show_admin_panel(self.lineup, paused=self.paused)
+
+    def _move_browse_cursor(self, delta: int) -> None:
+        numbers = self.lineup.numbers
+        if not numbers:
+            return
+        idx = numbers.index(self._browse_number) if self._browse_number in numbers else 0
+        self._browse_number = numbers[(idx + delta) % len(numbers)]
+        self._refresh_admin_panel()
+
+    def _confirm_browse_selection(self) -> None:
+        self.admin_browsing = False
+        if self._browse_number is not None:
+            self.select_channel_number(self._browse_number)
+        # select_channel_number() already refreshes the panel via
+        # tune_current() when it actually changes channel, but re-selecting
+        # the already-current channel takes an early-return path that
+        # doesn't - so refresh unconditionally to guarantee the corner panel
+        # replaces the browse grid either way.
+        self._refresh_admin_panel()
 
     def _toggle_pause(self) -> None:
         self.paused = not self.paused
@@ -420,8 +465,11 @@ class TVApp:
             self._switch_deadline = None
             self._pending_banner = None
             # Standby is the kid-proof reset point: never leave the box
-            # sitting in admin mode / paused underneath a blanked screen.
+            # sitting in admin mode / paused / mid-browse underneath a
+            # blanked screen.
             self.admin_mode = False
+            self.admin_browsing = False
+            self._browse_number = None
             self.paused = False
             self.player.stop()
             self.overlay.clear_all()

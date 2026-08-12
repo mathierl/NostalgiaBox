@@ -299,13 +299,16 @@ def test_resume_mode_restarts_where_left(tmp_path):
 # would: by delivering the Action.ADMIN_TOGGLE event it emits on release.
 
 
-def test_admin_toggle_shows_panel_listing_all_channels(tmp_path):
+def test_admin_toggle_opens_browse_grid_listing_all_channels(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     assert not app.admin_mode
     send(app, Action.ADMIN_TOGGLE)
     assert app.admin_mode
+    assert app.admin_browsing  # opens straight into the "pick a channel" grid
+    assert app._browse_number == 2  # cursor starts on whatever's playing
     panel = player.overlays.get(5, "")
+    assert "SELECT A CHANNEL" in panel
     assert "Dragon Tales" in panel and "Arthur" in panel and "Rugrats" in panel
     assert "(4 eps)" in panel
 
@@ -318,11 +321,53 @@ def test_admin_toggle_off_by_default_mute_still_mutes(tmp_path):
     assert player.paused is False  # untouched: mute is still just mute
 
 
-def test_mute_becomes_pause_play_in_admin_mode(tmp_path):
+def test_channel_up_down_moves_browse_cursor_without_tuning(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.MUTE)
+    send(app, Action.CHANNEL_UP)
+    assert app._browse_number == 3  # cursor moved...
+    assert app.lineup.current.number == 2  # ...but playback didn't
+    assert "> CH 03" in player.overlays.get(5, "")
+    send(app, Action.CHANNEL_UP)
+    assert app._browse_number == 4
+    send(app, Action.CHANNEL_UP)
+    assert app._browse_number == 2  # wraps
+    send(app, Action.CHANNEL_DOWN)
+    assert app._browse_number == 4  # wraps back
+
+
+def test_mute_confirms_browse_selection_and_tunes(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.CHANNEL_UP)  # cursor -> channel 3
+    send(app, Action.MUTE)  # confirm
+    assert not app.admin_browsing  # back to the corner panel
+    assert app.lineup.current.number == 3  # actually tuned there
+    assert player.muted is False  # confirm never touches real mute
+    panel = player.overlays.get(5, "")
+    assert "SELECT A CHANNEL" not in panel  # corner panel, not the grid
+
+
+def test_mute_confirms_same_channel_still_closes_grid(tmp_path):
+    # Re-selecting the already-current channel takes select_channel_number's
+    # early-return path (no tune_current call) - the grid must still close.
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm channel 2 (already current)
+    assert not app.admin_browsing
+    assert app.lineup.current.number == 2
+    assert "SELECT A CHANNEL" not in player.overlays.get(5, "")
+
+
+def test_mute_becomes_pause_play_after_confirming_selection(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm -> leaves browsing
+    send(app, Action.MUTE)  # now pause
     assert app.paused is True
     assert player.paused is True
     assert player.muted is False  # never touched the real mute
@@ -335,22 +380,25 @@ def test_exiting_admin_mode_unpauses_and_clears_panel(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm selection
     send(app, Action.MUTE)  # pause
     assert app.paused
     send(app, Action.ADMIN_TOGGLE)  # exit admin mode
     assert not app.admin_mode
+    assert not app.admin_browsing
     assert not app.paused
     assert player.paused is False
     assert 5 not in player.overlays  # admin panel cleared
 
 
-def test_changing_channel_in_admin_mode_unpauses_and_refreshes_panel(tmp_path):
+def test_changing_channel_after_browsing_unpauses_and_refreshes_panel(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm channel 2
     send(app, Action.MUTE)  # pause on channel 2
     assert app.paused
-    send(app, Action.CHANNEL_UP)  # flip to channel 3
+    send(app, Action.CHANNEL_UP)  # normal channel change now that we're not browsing
     assert not app.paused  # fresh channel: no longer paused
     assert "CH 03" in player.overlays.get(5, "") or "> CH 03" in player.overlays.get(5, "")
 
@@ -364,13 +412,15 @@ def test_admin_toggle_ignored_while_in_standby(tmp_path):
     assert not app.admin_mode  # blocked, same as every other action in standby
 
 
-def test_entering_standby_resets_admin_mode_and_pause(tmp_path):
+def test_entering_standby_resets_admin_mode_browsing_and_pause(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm selection
     send(app, Action.MUTE)  # pause
     assert app.admin_mode and app.paused
     send(app, Action.POWER)  # standby
     assert not app.admin_mode
+    assert not app.admin_browsing
     assert not app.paused
     assert 5 not in player.overlays
