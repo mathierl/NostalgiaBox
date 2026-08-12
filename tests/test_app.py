@@ -297,20 +297,29 @@ def test_resume_mode_restarts_where_left(tmp_path):
 # is intentionally untested here (see tests/test_keymap.py for the pure
 # key-mapping pieces). These tests drive the app the same way that backend
 # would: by delivering the Action.ADMIN_TOGGLE event it emits on release.
+#
+# Admin mode has two nested screens: the show grid (admin_browsing) and,
+# after confirming a show, that show's episode list (admin_episode_browsing).
+# Channel Up/Down move a cursor in whichever screen is open (a 2D row/col
+# cursor in the grid - Volume Up/Down move columns there too - or a simple
+# index in the episode list); Mute confirms; Power backs out of the episode
+# list to the grid instead of standby. Confirming an episode is the only
+# thing that actually changes what's playing - selecting a show just opens
+# its episode list.
 
 
-def test_admin_toggle_opens_browse_grid_listing_all_channels(tmp_path):
+def test_admin_toggle_opens_show_grid(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     assert not app.admin_mode
     send(app, Action.ADMIN_TOGGLE)
     assert app.admin_mode
-    assert app.admin_browsing  # opens straight into the "pick a channel" grid
+    assert app.admin_browsing and not app.admin_episode_browsing
     assert app._browse_number == 2  # cursor starts on whatever's playing
     panel = player.overlays.get(5, "")
-    assert "SELECT A CHANNEL" in panel
+    assert "Select a channel" in panel
     assert "Dragon Tales" in panel and "Arthur" in panel and "Rugrats" in panel
-    assert "(4 eps)" in panel
+    assert "4 eps" in panel
 
 
 def test_admin_toggle_off_by_default_mute_still_mutes(tmp_path):
@@ -321,53 +330,123 @@ def test_admin_toggle_off_by_default_mute_still_mutes(tmp_path):
     assert player.paused is False  # untouched: mute is still just mute
 
 
-def test_channel_up_down_moves_browse_cursor_without_tuning(tmp_path):
+def test_channel_up_down_move_grid_row_cursor(tmp_path):
+    # 3 channels (2, 3, 4) in a 2-column grid: row 0 = [2, 3], row 1 = [4].
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.CHANNEL_UP)
-    assert app._browse_number == 3  # cursor moved...
-    assert app.lineup.current.number == 2  # ...but playback didn't
-    assert "> CH 03" in player.overlays.get(5, "")
-    send(app, Action.CHANNEL_UP)
-    assert app._browse_number == 4
-    send(app, Action.CHANNEL_UP)
-    assert app._browse_number == 2  # wraps
+    assert app._browse_number == 2
     send(app, Action.CHANNEL_DOWN)
-    assert app._browse_number == 4  # wraps back
+    assert app._browse_number == 4  # only item on row 1
+    assert app.lineup.current.number == 2  # cursor moved, playback didn't
+    send(app, Action.CHANNEL_UP)
+    assert app._browse_number == 2  # back to row 0
 
 
-def test_mute_confirms_browse_selection_and_tunes(tmp_path):
+def test_volume_up_down_move_grid_column_cursor(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.CHANNEL_UP)  # cursor -> channel 3
-    send(app, Action.MUTE)  # confirm
-    assert not app.admin_browsing  # back to the corner panel
-    assert app.lineup.current.number == 3  # actually tuned there
-    assert player.muted is False  # confirm never touches real mute
-    panel = player.overlays.get(5, "")
-    assert "SELECT A CHANNEL" not in panel  # corner panel, not the grid
+    send(app, Action.VOLUME_UP)
+    assert app._browse_number == 3  # column moved within row 0
+    assert app.volume == 70  # real volume untouched while browsing
+    send(app, Action.VOLUME_UP)
+    assert app._browse_number == 2  # wraps back
+    send(app, Action.VOLUME_DOWN)
+    assert app._browse_number == 3
 
 
-def test_mute_confirms_same_channel_still_closes_grid(tmp_path):
-    # Re-selecting the already-current channel takes select_channel_number's
-    # early-return path (no tune_current call) - the grid must still close.
+def test_mute_on_grid_opens_episode_list_without_tuning(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.MUTE)  # confirm channel 2 (already current)
+    send(app, Action.MUTE)  # confirm "Dragon Tales" (already highlighted)
     assert not app.admin_browsing
-    assert app.lineup.current.number == 2
-    assert "SELECT A CHANNEL" not in player.overlays.get(5, "")
+    assert app.admin_episode_browsing
+    assert app._browse_episode_number == 2
+    assert app._browse_episode_index == 0
+    assert app.lineup.current.number == 2  # selecting a show doesn't tune yet
+    assert player.muted is False
+    panel = player.overlays.get(5, "")
+    assert "Dragon Tales" in panel and "Select an episode" in panel
 
 
-def test_mute_becomes_pause_play_after_confirming_selection(tmp_path):
+def test_channel_up_down_move_episode_cursor(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.MUTE)  # confirm -> leaves browsing
-    send(app, Action.MUTE)  # now pause
+    send(app, Action.MUTE)  # into Dragon Tales' episode list (4 episodes)
+    send(app, Action.CHANNEL_DOWN)
+    assert app._browse_episode_index == 1
+    send(app, Action.CHANNEL_UP)
+    assert app._browse_episode_index == 0
+    send(app, Action.CHANNEL_UP)
+    assert app._browse_episode_index == 3  # wraps to the last episode
+
+
+def test_mute_confirms_episode_and_plays_it(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # Dragon Tales episode list
+    send(app, Action.CHANNEL_DOWN)  # episode index 1
+    channel = next(c for c in app.lineup if c.number == 2)
+    expected_path = channel.episodes[1]
+    send(app, Action.MUTE)  # confirm episode
+    assert not app.admin_episode_browsing
+    assert not app.admin_browsing
+    assert app.admin_mode  # back to the lightweight corner panel, not exited
+    assert app.lineup.current.number == 2
+    assert player.current == expected_path
+    assert player.played[-1] == (expected_path, 0.0)
+    assert player.muted is False
+    assert "Select a channel" not in player.overlays.get(5, "")
+    assert "Select an episode" not in player.overlays.get(5, "")
+
+
+def test_power_backs_out_of_episode_list_to_grid(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # into episode list
+    assert app.admin_episode_browsing
+    send(app, Action.POWER)
+    assert not app.admin_episode_browsing
+    assert app.admin_browsing
+    assert not app.standby  # power backed out, it did not toggle standby
+    assert "Select a channel" in player.overlays.get(5, "")
+
+
+def test_admin_toggle_exits_directly_from_episode_list(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # into episode list
+    send(app, Action.ADMIN_TOGGLE)  # long-press exits from anywhere
+    assert not app.admin_mode
+    assert not app.admin_browsing and not app.admin_episode_browsing
+
+
+def test_browsing_without_picking_anything_resumes_on_exit(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    playing = player.current
+    player.time_pos = 17.5
+    send(app, Action.ADMIN_TOGGLE)  # captures pre-admin path/position
+    send(app, Action.CHANNEL_DOWN)  # just look around, pick nothing
+    send(app, Action.ADMIN_TOGGLE)  # exit without confirming an episode
+    assert not app.admin_mode
+    assert player.current == playing
+    assert player.played[-1] == (playing, 17.5)
+
+
+def test_mute_becomes_pause_play_once_watching(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm show
+    send(app, Action.MUTE)  # confirm episode -> now watching
+    send(app, Action.MUTE)  # pause
     assert app.paused is True
     assert player.paused is True
     assert player.muted is False  # never touched the real mute
@@ -380,25 +459,27 @@ def test_exiting_admin_mode_unpauses_and_clears_panel(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.MUTE)  # confirm selection
+    send(app, Action.MUTE)  # confirm show
+    send(app, Action.MUTE)  # confirm episode
     send(app, Action.MUTE)  # pause
     assert app.paused
     send(app, Action.ADMIN_TOGGLE)  # exit admin mode
     assert not app.admin_mode
-    assert not app.admin_browsing
+    assert not app.admin_browsing and not app.admin_episode_browsing
     assert not app.paused
     assert player.paused is False
     assert 5 not in player.overlays  # admin panel cleared
 
 
-def test_changing_channel_after_browsing_unpauses_and_refreshes_panel(tmp_path):
+def test_changing_channel_while_watching_unpauses_and_refreshes_panel(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.MUTE)  # confirm channel 2
-    send(app, Action.MUTE)  # pause on channel 2
+    send(app, Action.MUTE)  # confirm show
+    send(app, Action.MUTE)  # confirm episode -> watching channel 2
+    send(app, Action.MUTE)  # pause
     assert app.paused
-    send(app, Action.CHANNEL_UP)  # normal channel change now that we're not browsing
+    send(app, Action.CHANNEL_UP)  # normal channel change now that we're watching
     assert not app.paused  # fresh channel: no longer paused
     assert "CH 03" in player.overlays.get(5, "") or "> CH 03" in player.overlays.get(5, "")
 
@@ -416,11 +497,13 @@ def test_entering_standby_resets_admin_mode_browsing_and_pause(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.MUTE)  # confirm selection
+    send(app, Action.MUTE)  # confirm show
+    send(app, Action.MUTE)  # confirm episode
     send(app, Action.MUTE)  # pause
     assert app.admin_mode and app.paused
     send(app, Action.POWER)  # standby
     assert not app.admin_mode
-    assert not app.admin_browsing
+    assert not app.admin_browsing and not app.admin_episode_browsing
     assert not app.paused
+    assert app._pre_admin_path is None
     assert 5 not in player.overlays

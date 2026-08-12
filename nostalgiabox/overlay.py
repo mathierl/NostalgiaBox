@@ -16,12 +16,14 @@ scales it to the TV) and cleared automatically after a few seconds by
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Callable, Dict, Optional
 
-from .channel import ChannelLineup
+from .channel import Channel, ChannelLineup
 from .config import Config, UiConfig
 from .player import Player
+from .thumbnails import admin_grid_tile_rect
 
 # Virtual canvas the overlays are laid out on. This maps to the WHOLE display
 # (a 16:9 TV), so mpv scales it to whatever the screen is.
@@ -106,14 +108,25 @@ class OverlayManager:
     def show_admin_browser(
         self, lineup: "ChannelLineup", *, highlight_number: Optional[int]
     ) -> None:
-        """Full-screen 'pick a channel' grid: every channel, its episode
-        count, and the highlighted one picked out in the bright UI colour
-        (everything else dimmed). This is what admin mode opens into; see
-        :class:`nostalgiabox.app.TVApp`.
+        """Highlight ring, title/subtitle labels and header/footer text drawn
+        on top of the real poster-grid background image (see
+        :mod:`nostalgiabox.thumbnails` and :class:`nostalgiabox.app.TVApp`,
+        which swaps the player onto that image before calling this).
         """
-        ass = _admin_browser_ass(lineup, highlight_number, self._ui)
+        ass = _admin_browser_ass(lineup, highlight_number)
         self._player.set_overlay(_ID_ADMIN, ass, CANVAS_W, CANVAS_H)
         self._expiry.pop(_ID_ADMIN, None)  # persistent until cleared
+
+    def show_admin_episode_list(
+        self, channel: "Channel", *, highlight_index: Optional[int]
+    ) -> None:
+        """Full-screen numbered episode list for one channel (no poster art -
+        just an opaque backdrop plus text), reached by confirming a channel
+        in :meth:`show_admin_browser`.
+        """
+        ass = _admin_episode_list_ass(channel, highlight_index)
+        self._player.set_overlay(_ID_ADMIN, ass, CANVAS_W, CANVAS_H)
+        self._expiry.pop(_ID_ADMIN, None)
 
     def clear_admin_panel(self) -> None:
         # Clears whichever admin view is currently up - the browse grid and
@@ -241,59 +254,111 @@ def _standby_ass(ui: UiConfig) -> str:
     return rf"{{\an5\pos({_FRAME_CX},{CANVAS_H // 2}){_style(ui, size=72)}}}STANDBY"
 
 
+# --------------------------------------------------------------------------
+# Admin mode: modern (Netflix-ish) styling, deliberately separate from the
+# retro CRT look above - kid-facing overlays never use any of this. No glow/
+# blur (flat, not phosphor-bloom), a bundled sans-serif instead of the retro
+# terminal font, and a dark neutral palette instead of CRT green.
+# --------------------------------------------------------------------------
+_ADMIN_FONT = "Roboto"  # bundled sans-serif; see assets/fonts/Roboto-LICENSE.txt (Apache-2.0)
+_ADMIN_WHITE = "&H00FFFFFF"
+_ADMIN_DIM = "&H00B3B3B3"
+_ADMIN_MUTED = "&H00737373"
+_ADMIN_BG = "&H00141414"
+
+
+def _admin_style(*, size: int, color: str = _ADMIN_WHITE, bold: bool = True) -> str:
+    b = 1 if bold else 0
+    return rf"\fn{_ADMIN_FONT}\b{b}\fs{size}\c{color}\1a&H00&\bord0\shad0"
+
+
 def _admin_panel_ass(lineup: "ChannelLineup", paused: bool, ui: UiConfig) -> str:
     """A small, dense readout in the top-left: every channel with its episode
-    count (current channel marked with '>'), plus the pause state - the
-    grown-ups-only overview the kid remote never shows.
+    count (current channel marked), plus the pause state - the grown-ups-only
+    overview the kid remote never shows.
     """
     current = lineup.current.number
-    lines = [f"{'PAUSED' if paused else 'ADMIN'}"]
+    lines = [("PAUSED" if paused else "ADMIN", _ADMIN_WHITE, True)]
     for channel in lineup:
-        marker = ">" if channel.number == current else " "
+        marker = "> " if channel.number == current else "   "
         count = len(channel.episodes)
         ep_label = "ep" if count == 1 else "eps"
-        lines.append(
-            f"{marker}CH {channel.number:02d}  {channel.name}  ({count} {ep_label})"
-        )
-    row_h = 34
+        text = f"{marker}CH {channel.number:02d}  {channel.name}  ({count} {ep_label})"
+        lines.append((text, _ADMIN_WHITE if channel.number == current else _ADMIN_DIM, False))
+    row_h = 32
     parts = []
-    for i, text in enumerate(lines):
+    for i, (text, color, bold) in enumerate(lines):
         y = _IY0 + i * row_h
-        parts.append(rf"{{\an7\pos({_IX0},{y}){_style(ui, size=28)}}}{_escape(text)}")
+        style = _admin_style(size=24, color=color, bold=bold)
+        parts.append(rf"{{\an7\pos({_IX0},{y}){style}}}{_escape(text)}")
     return "\n".join(parts)
 
 
-def _admin_browser_ass(
-    lineup: "ChannelLineup", highlight_number: Optional[int], ui: UiConfig
-) -> str:
-    """The full-screen 'SELECT A CHANNEL' grid admin mode opens into: a
-    header, one row per channel (episode count included, highlighted one
-    bright, the rest dimmed), and a footer reminding what the buttons do.
+def _admin_browser_ass(lineup: "ChannelLineup", highlight_number: Optional[int]) -> str:
+    """Header, per-channel title/episode-count labels (positioned to sit right
+    under each poster - see :func:`nostalgiabox.thumbnails.admin_grid_tile_rect`
+    - a highlight ring around the selected one, and a footer hint. The posters
+    themselves are the background image this draws on top of, not drawn here.
     """
-    header = "SELECT A CHANNEL"
-    footer = "MUTE = SELECT      HOLD POWER = EXIT"
-    rows = []
-    for channel in lineup:
+    channels = list(lineup)
+    header = "Select a channel"
+    footer = "\u2190\u2191\u2193\u2192 move      mute select      hold power exit"
+
+    parts = [rf"{{\an7\pos({_IX0},{_IY0}){_admin_style(size=34)}}}{_escape(header)}"]
+    for i, channel in enumerate(channels):
+        lx, ly, w, h = admin_grid_tile_rect(i, len(channels))
+        x, y = _FRAME_X0 + lx, ly
+        selected = channel.number == highlight_number
+        if selected:
+            parts.append(_outline_rect(x=x - 4, y=y - 4, w=w + 8, h=h + 8, color=_ADMIN_WHITE, thickness=3))
         count = len(channel.episodes)
         ep_label = "ep" if count == 1 else "eps"
-        rows.append(
-            (channel.number, f"CH {channel.number:02d}   {channel.name}   ({count} {ep_label})")
-        )
-
-    row_h = 60
-    block_h = len(rows) * row_h
-    start_y = max(_IY0 + 90, (_IY0 + _IY1) // 2 - block_h // 2)
-
-    parts = [rf"{{\an8\pos({_FRAME_CX},{_IY0}){_style(ui, size=44)}}}{_escape(header)}"]
-    for i, (number, text) in enumerate(rows):
-        y = start_y + i * row_h
-        selected = number == highlight_number
-        size = 40 if selected else 32
-        label = ("> " if selected else "  ") + text
-        style = _style(ui, size=size) if selected else _dim_style(ui, size=size)
-        parts.append(rf"{{\an5\pos({_FRAME_CX},{y}){style}}}{_escape(label)}")
-    parts.append(rf"{{\an2\pos({_FRAME_CX},{_IY1}){_style(ui, size=26)}}}{_escape(footer)}")
+        title = f"CH {channel.number:02d}  {channel.name}"
+        subtitle = f"{count} {ep_label}"
+        title_color = _ADMIN_WHITE if selected else _ADMIN_DIM
+        parts.append(rf"{{\an7\pos({x},{y + h + 8}){_admin_style(size=22, color=title_color)}}}{_escape(title)}")
+        parts.append(rf"{{\an7\pos({x},{y + h + 34}){_admin_style(size=18, color=_ADMIN_MUTED, bold=False)}}}{_escape(subtitle)}")
+    parts.append(rf"{{\an2\pos({_FRAME_CX},{_IY1}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}{_escape(footer)}")
     return "\n".join(parts)
+
+
+def _admin_episode_list_ass(channel: "Channel", highlight_index: Optional[int]) -> str:
+    """Full-screen numbered episode list for one channel: an opaque dark
+    backdrop (there's no poster image behind this screen, unlike the show
+    grid) plus a header, the numbered rows, and a footer hint.
+    """
+    backdrop = _filled_rect(x=_FRAME_X0, y=0, w=_FRAME_W, h=CANVAS_H, fill=_ADMIN_BG)
+    header = _escape(channel.name)
+    subheader = "Select an episode"
+    footer = "\u2191\u2193 move      mute select      power back"
+
+    parts = [backdrop]
+    parts.append(rf"{{\an7\pos({_IX0},{_IY0}){_admin_style(size=34)}}}{header}")
+    parts.append(rf"{{\an7\pos({_IX0},{_IY0 + 44}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}{_escape(subheader)}")
+
+    row_h = 40
+    top = _IY0 + 96
+    for i, path in enumerate(channel.episodes):
+        selected = i == highlight_index
+        y = top + i * row_h
+        color = _ADMIN_WHITE if selected else _ADMIN_DIM
+        label = f"{i + 1}.  {_episode_title(path)}"
+        parts.append(rf"{{\an7\pos({_IX0},{y}){_admin_style(size=24, color=color, bold=selected)}}}{_escape(label)}")
+    parts.append(rf"{{\an2\pos({_FRAME_CX},{_IY1}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}{_escape(footer)}")
+    return "\n".join(parts)
+
+
+_EPISODE_BRACKET_ID = re.compile(r"\s*\[[^\[\]]*\]\s*$")
+
+
+def _episode_title(path) -> str:
+    """Best-effort human title from an episode filename: drop the extension
+    and a trailing '[...]' id tag some downloaders append, e.g. turns
+    'Bluey - 17. Butlere [MSUI27006725].mp4' into 'Bluey - 17. Butlere'.
+    """
+    stem = path.stem if hasattr(path, "stem") else str(path)
+    cleaned = _EPISODE_BRACKET_ID.sub("", stem).strip()
+    return cleaned or stem
 
 
 def _filled_rect(*, x: float, y: float, w: float, h: float, fill: str) -> str:
@@ -302,6 +367,18 @@ def _filled_rect(*, x: float, y: float, w: float, h: float, fill: str) -> str:
     w, h = round(w), round(h)
     draw = f"m 0 0 l {w} 0 l {w} {h} l 0 {h}"
     return rf"{{\an7\pos({x},{y})\p1\c{fill}\1a&H00&\bord0\shad0}}{draw}{{\p0}}"
+
+
+def _outline_rect(*, x: float, y: float, w: float, h: float, color: str, thickness: int) -> str:
+    """An ASS drawing: an unfilled rectangle outline - the admin grid's
+    selection ring around the highlighted poster tile."""
+    x, y = round(x), round(y)
+    w, h = round(w), round(h)
+    draw = f"m 0 0 l {w} 0 l {w} {h} l 0 {h}"
+    return (
+        rf"{{\an7\pos({x},{y})\p1\1a&HFF&\3c{color}\bord{thickness}\shad0}}"
+        rf"{draw}{{\p0}}"
+    )
 
 
 def _dot(*, cx: float, cy: float, r: float, fill: str) -> str:

@@ -9,8 +9,8 @@ automatically on an endless shuffle. It boots straight to the TV on power-up, is
 driven by a simple remote, sends audio over HDMI, and has an authentic
 early-2000s vibe — a green on-screen channel banner and volume bar, and a curved
 "CRT" picture. No menus, no apps, no touchscreens. Just a remote and channels. Grown-ups get
-a hidden admin view (hold Power) with a full channel overview and pause/play -
-kids never see it.
+a hidden admin view (hold Power) with a modern, Netflix-style channel and
+episode browser, poster art, and pause/play - kids never see it.
 
 This guide has two parts:
 
@@ -257,29 +257,44 @@ Turn it on by plugging in power; it boots back to a channel automatically.
 ### Admin/developer view
 
 Holding **Power** for about 3 seconds (instead of a quick press, which just
-toggles standby) opens a hidden screen meant for adults: a full-screen
-**SELECT A CHANNEL** grid listing every channel and its episode count, with
-the current one highlighted. From there:
+toggles standby) opens a hidden screen meant for adults: a modern, dark
+**"Select a channel"** grid with a real poster thumbnail for every channel
+(auto-generated from each show's first episode) and its episode count, with
+the current one ringed. It's a two-step browser:
 
-- **Channel Up/Down** moves the highlighted selection (this does *not* change
-  the channel yet - it's just scrolling through the list).
-- **Mute** confirms the highlighted channel and tunes to it, which also closes
-  the grid back down to a small corner readout so the show keeps playing.
-- **Hold Power** again at any point to close the admin view entirely.
+1. **Show grid.** **Channel Up/Down** moves the selection up/down a row,
+   **Volume Up/Down** moves it left/right within a row (this is just
+   scrolling - nothing changes yet). **Mute** confirms the highlighted show
+   and opens its episode list.
+2. **Episode list.** A plain numbered list of every episode in that show.
+   **Channel Up/Down** moves the highlighted episode. **Mute** confirms it and
+   starts playing that exact episode, closing the browser down to a small
+   corner readout so the show keeps playing. **Power** (a normal press, not a
+   hold) backs out to the show grid instead of going to standby.
 
-Once you've confirmed a channel and the grid has closed, **Mute** switches
+**Hold Power** again at any point - grid, episode list, or once something's
+playing - to close the admin view entirely. If you close it without ever
+confirming an episode, playback resumes exactly where it was when you opened
+admin mode; nothing is interrupted just by looking around.
+
+Once you've confirmed an episode and the browser has closed, **Mute** switches
 roles again and becomes **pause/play** - a control the kid-facing remote never
 exposes, since a small kid pausing the TV mid-show tends to end in tears.
 **Channel Up/Down** also switches back to changing the channel immediately
-(as normal) once you're out of the grid. To browse again, hold Power to close
-admin mode, then hold it again to reopen the grid.
+(as normal) once you're out of the browser. To browse again, hold Power to
+close admin mode, then hold it again to reopen the grid.
 
 A couple of notes:
 
+- Poster thumbnails are generated automatically (one frame grabbed from each
+  channel's first episode via `ffmpeg`, cached to disk) whenever you run
+  `nostalgiabox --check` or reinstall/update - nothing to do by hand. If a
+  channel has no readable video yet, its tile just falls back to a plain
+  placeholder instead of a poster.
 - It only works while a channel is on screen - not from standby, and putting
-  the box into standby closes the admin view (grid or not) and un-pauses
-  first, so a kid power-cycling the box can never get stuck on a paused or
-  half-browsed screen.
+  the box into standby closes the admin view (grid, episode list, or neither)
+  and un-pauses first, so a kid power-cycling the box can never get stuck on
+  a paused or half-browsed screen.
 - Turn it off entirely with `admin_mode_enabled: false` in `config.yaml`, or
   change how long the hold needs to be with `admin_hold_seconds` (default
   `3.0`).
@@ -315,7 +330,7 @@ transition: none         # channel-change effect: none | glitch | static
 bridge_seconds: 0.8      # keep the current show playing while the next loads
 channel_bug_seconds: 4   # how long the channel banner lingers
 initial_volume: 70       # 0-100
-admin_mode_enabled: true # hidden grown-ups view (channel overview + pause/play)
+admin_mode_enabled: true # hidden grown-ups view (posters, episode picker, pause/play)
 admin_hold_seconds: 3.0  # how long to hold Power to open it
 audio_device: "..."      # force HDMI audio (see Part H)
 
@@ -376,10 +391,11 @@ nostalgiabox/
 ├── playlist.py    the shuffle bag (each episode once, then reshuffle)
 ├── channel.py     folder scanning, tune-in modes, channel navigation
 ├── player.py      mpv player (+ a mock for tests)
-├── overlay.py     the green on-screen display
+├── overlay.py     the green on-screen display + the admin-mode UI
 ├── crt.py         the CRT shader
 ├── input/         remote input (Flirc/keyboard, HDMI-CEC, keymap)
 ├── static_gen.py  ffmpeg-generated static/glitch/colour-bar clips
+├── thumbnails.py  ffmpeg + Pillow poster art for the admin-mode grid
 └── app.py         the TV state machine
 ```
 

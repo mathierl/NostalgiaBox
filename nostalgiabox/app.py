@@ -68,12 +68,26 @@ class TVApp:
         # pause/play; the kid-facing remote is unaffected either way.
         self.admin_mode = False
         self.paused = False
-        # True while the full-screen "SELECT A CHANNEL" browse grid is up
-        # (entered automatically when admin mode opens). Channel Up/Down move
-        # a highlight cursor instead of actually changing the channel while
-        # this is True; Mute confirms and tunes to the highlighted channel.
+        # Admin mode has two nested browse screens. admin_browsing = True is
+        # the top-level "select a channel" poster grid: Channel Up/Down move a
+        # row cursor, Volume Up/Down (repurposed here only) move a column
+        # cursor, Mute confirms and drills into that channel's episode list
+        # (admin_episode_browsing = True): Channel Up/Down move an episode
+        # cursor, Mute plays that exact episode, Power backs out to the show
+        # grid instead of standby. Long-press Power always exits admin mode
+        # entirely, from either screen.
         self.admin_browsing = False
+        self.admin_episode_browsing = False
         self._browse_number: Optional[int] = None
+        self._browse_episode_number: Optional[int] = None
+        self._browse_episode_index: int = 0
+        # What was playing right before admin mode opened, so browsing
+        # without picking anything new resumes exactly where it left off
+        # (the show grid replaces the live picture with poster art - see
+        # _show_admin_grid_background). Cleared once a new episode is
+        # actually chosen, since there's then nothing to resume.
+        self._pre_admin_path: Optional[Path] = None
+        self._pre_admin_pos: float = 0.0
         self._playing_path: Optional[Path] = None
         self._last_channel_number: Optional[int] = None
         self._running = False
@@ -213,6 +227,9 @@ class TVApp:
             self._running = False
             return
         if action == Action.POWER:
+            if self.admin_episode_browsing:
+                self._admin_back_to_shows()
+                return
             self._toggle_standby()
             return
 
@@ -240,8 +257,11 @@ class TVApp:
 
     # -- channel changing ---------------------------------------------------
     def _channel_up(self) -> None:
+        if self.admin_episode_browsing:
+            self._move_episode_cursor(-1)
+            return
         if self.admin_browsing:
-            self._move_browse_cursor(1)
+            self._move_browse_cursor(drow=-1)
             return
         self._remember_position()
         self._last_channel_number = self.lineup.current.number
@@ -249,8 +269,11 @@ class TVApp:
         self.tune_current()
 
     def _channel_down(self) -> None:
+        if self.admin_episode_browsing:
+            self._move_episode_cursor(1)
+            return
         if self.admin_browsing:
-            self._move_browse_cursor(-1)
+            self._move_browse_cursor(drow=1)
             return
         self._remember_position()
         self._last_channel_number = self.lineup.current.number
@@ -348,9 +371,15 @@ class TVApp:
 
     # -- volume -------------------------------------------------------------
     def _volume_up(self) -> None:
+        if self.admin_browsing:
+            self._move_browse_cursor(dcol=1)
+            return
         self._set_volume(self.volume + self.config.volume_step, unmute=True)
 
     def _volume_down(self) -> None:
+        if self.admin_browsing:
+            self._move_browse_cursor(dcol=-1)
+            return
         # One press below zero cleanly powers off the box (safe to unplug).
         if self.config.power_off_on_min_volume and not self.muted and self.volume <= 0:
             self._power_off()
@@ -390,12 +419,15 @@ class TVApp:
             log.exception("power-off command failed: %s", command)
 
     def _toggle_mute(self) -> None:
-        # In the admin view, Mute is repurposed: while the browse grid is up
-        # it confirms the highlighted channel, otherwise it's pause/play (a
-        # capability the kid-facing remote never exposes). Everywhere else it
-        # behaves exactly as before.
+        # In the admin view, Mute is repurposed: it confirms whatever's
+        # highlighted in the show grid or episode list, otherwise it's
+        # pause/play (a capability the kid-facing remote never exposes).
+        # Everywhere else it behaves exactly as before.
+        if self.admin_episode_browsing:
+            self._confirm_episode_selection()
+            return
         if self.admin_browsing:
-            self._confirm_browse_selection()
+            self._confirm_show_selection()
             return
         if self.admin_mode:
             self._toggle_pause()
@@ -408,45 +440,144 @@ class TVApp:
     def _toggle_admin_mode(self) -> None:
         self.admin_mode = not self.admin_mode
         if self.admin_mode:
-            # Opening admin mode always lands on the full-screen "pick a
-            # channel" browse grid, cursor starting on whatever's playing.
+            # Opening admin mode always lands on the full-screen show grid,
+            # cursor starting on whatever's playing. Remember exactly where
+            # we are so browsing without picking anything new can resume it.
             self.admin_browsing = True
+            self.admin_episode_browsing = False
             self._browse_number = self.lineup.current.number
+            self._browse_episode_number = None
+            self._browse_episode_index = 0
+            self._pre_admin_path = self._playing_path
+            self._pre_admin_pos = self.player.get_time_pos() or 0.0
+            self._show_admin_grid_background()
             self._refresh_admin_panel()
         else:
             self.admin_browsing = False
-            self._browse_number = None
+            self.admin_episode_browsing = False
             if self.paused:
                 self._toggle_pause()
             self.overlay.clear_admin_panel()
+            if self._pre_admin_path is not None:
+                # Nothing new was picked this session - resume exactly where
+                # we left off rather than restarting/re-shuffling.
+                self._play_request(PlayRequest(path=self._pre_admin_path, start=self._pre_admin_pos))
+                self._pre_admin_path = None
             self._show_info()
 
     def _refresh_admin_panel(self) -> None:
         if not self.admin_mode:
             return
+        if self.admin_episode_browsing:
+            channel = self._channel_by_number(self._browse_episode_number)
+            if channel is not None:
+                self.overlay.show_admin_episode_list(channel, highlight_index=self._browse_episode_index)
+            return
         if self.admin_browsing:
             self.overlay.show_admin_browser(self.lineup, highlight_number=self._browse_number)
-        else:
-            self.overlay.show_admin_panel(self.lineup, paused=self.paused)
+            return
+        self.overlay.show_admin_panel(self.lineup, paused=self.paused)
 
-    def _move_browse_cursor(self, delta: int) -> None:
+    def _channel_by_number(self, number: Optional[int]) -> Optional[Channel]:
+        if number is None:
+            return None
+        return next((c for c in self.lineup if c.number == number), None)
+
+    def _admin_thumbs_cache_dir(self) -> Path:
+        from .thumbnails import THUMBS_SUBDIR
+
+        return self._assets_dir / THUMBS_SUBDIR
+
+    def _show_admin_grid_background(self) -> None:
+        """Swap the player onto the pre-composed poster-grid image (see
+        nostalgiabox.thumbnails) so real show art fills the screen behind the
+        highlight ring/labels overlay.show_admin_browser draws. If it hasn't
+        been generated yet (--check was never run since adding shows), this
+        is a no-op - the browse overlay still works, just without posters,
+        drawn over whatever was already playing.
+        """
+        from .thumbnails import GRID_FILENAME
+
+        image_path = self._admin_thumbs_cache_dir() / GRID_FILENAME
+        if image_path.is_file():
+            self.player.play_loop(image_path)
+        else:
+            log.info("admin show-grid image not found (run `nostalgiabox --check`)")
+
+    def _move_browse_cursor(self, *, drow: int = 0, dcol: int = 0) -> None:
+        from .thumbnails import GRID_COLS
+
         numbers = self.lineup.numbers
         if not numbers:
             return
+        cols = GRID_COLS if len(numbers) > 1 else 1
+        rows = (len(numbers) + cols - 1) // cols
         idx = numbers.index(self._browse_number) if self._browse_number in numbers else 0
-        self._browse_number = numbers[(idx + delta) % len(numbers)]
+        row, col = divmod(idx, cols)
+
+        if dcol:
+            row_start = row * cols
+            row_len = min(cols, len(numbers) - row_start)
+            col = (idx - row_start + dcol) % row_len
+            idx = row_start + col
+        if drow:
+            row = (row + drow) % rows
+            row_start = row * cols
+            row_len = min(cols, len(numbers) - row_start)
+            col = min(col, row_len - 1)
+            idx = row_start + col
+
+        self._browse_number = numbers[idx]
         self._refresh_admin_panel()
 
-    def _confirm_browse_selection(self) -> None:
+    def _confirm_show_selection(self) -> None:
         self.admin_browsing = False
-        if self._browse_number is not None:
-            self.select_channel_number(self._browse_number)
-        # select_channel_number() already refreshes the panel via
-        # tune_current() when it actually changes channel, but re-selecting
-        # the already-current channel takes an early-return path that
-        # doesn't - so refresh unconditionally to guarantee the corner panel
-        # replaces the browse grid either way.
+        channel = self._channel_by_number(self._browse_number)
+        if channel is not None:
+            self.admin_episode_browsing = True
+            self._browse_episode_number = channel.number
+            self._browse_episode_index = 0
         self._refresh_admin_panel()
+
+    def _admin_back_to_shows(self) -> None:
+        self.admin_episode_browsing = False
+        self.admin_browsing = True
+        self._refresh_admin_panel()
+
+    def _move_episode_cursor(self, delta: int) -> None:
+        channel = self._channel_by_number(self._browse_episode_number)
+        if channel is None or not channel.episodes:
+            return
+        n = len(channel.episodes)
+        self._browse_episode_index = (self._browse_episode_index + delta) % n
+        self._refresh_admin_panel()
+
+    def _confirm_episode_selection(self) -> None:
+        self.admin_episode_browsing = False
+        channel = self._channel_by_number(self._browse_episode_number)
+        if channel is not None and 0 <= self._browse_episode_index < len(channel.episodes):
+            episode_path = channel.episodes[self._browse_episode_index]
+            self._play_specific_episode(channel.number, episode_path)
+            self._pre_admin_path = None  # something new is playing; nothing to resume
+        self._browse_number = self.lineup.current.number
+        self._refresh_admin_panel()
+
+    def _play_specific_episode(self, channel_number: int, episode_path: Path) -> None:
+        """Play exactly this episode (picked from the admin episode list),
+        bypassing the channel's normal tune-in behaviour (random/resume/
+        broadcast) for this one play-through.
+        """
+        if not self.lineup.has_number(channel_number):
+            return
+        self._remember_position()
+        self._last_channel_number = self.lineup.current.number
+        self.lineup.select_number(channel_number)
+        channel = self.lineup.current
+        self.overlay.clear_standby()
+        self._pending_banner = None
+        self._switch_deadline = None
+        self.overlay.show_channel_bug(channel.number, channel.name)
+        self._play_request(PlayRequest(path=episode_path, start=0.0))
 
     def _toggle_pause(self) -> None:
         self.paused = not self.paused
@@ -469,7 +600,11 @@ class TVApp:
             # blanked screen.
             self.admin_mode = False
             self.admin_browsing = False
+            self.admin_episode_browsing = False
             self._browse_number = None
+            self._browse_episode_number = None
+            self._browse_episode_index = 0
+            self._pre_admin_path = None
             self.paused = False
             self.player.stop()
             self.overlay.clear_all()

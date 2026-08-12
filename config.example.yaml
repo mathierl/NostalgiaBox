@@ -130,9 +130,11 @@ scan_recursive: true      # also look inside season sub-folders for episodes
 # shuffle_seed: 1234       # set for a repeatable shuffle order (mostly for tests)
 
 # --- Admin/developer view -----------------------------------------------------
-# A hidden, grown-ups-only screen: every channel with its episode count, plus
-# pause/play (something the kid-facing remote never gets). Reached by holding
-# the Power button. See 'Part G' / 'Admin mode' in the README.
+# A hidden, grown-ups-only screen: a poster grid of every channel, an episode
+# picker inside each one, and pause/play (things the kid-facing remote never
+# gets). Reached by holding the Power button. See 'Admin/developer view' in
+# the README. Poster thumbnails are generated automatically by
+# `nostalgiabox --check` (via ffmpeg) - nothing to configure for that.
 admin_mode_enabled: true    # set false to remove the feature entirely
 admin_hold_seconds: 3.0     # how long to hold Power to trigger it (0.5-15)
 

@@ -58,7 +58,36 @@ def _cmd_check(config: Config) -> int:
         flag = "" if count else "   <-- NO EPISODES FOUND"
         print(f"  CH {channel.number:>3}  {channel.name:<28} {count:>4} episodes{flag}")
     print(f"total episodes: {total}")
+
+    if config.admin_mode_enabled:
+        _generate_admin_thumbnails(config, lineup)
+
     return 0 if total > 0 else 1
+
+
+def _generate_admin_thumbnails(config: Config, lineup) -> None:
+    """(Re)generate the admin-mode show-grid poster art, best-effort.
+
+    Runs as part of --check (and so scripts/install.sh) rather than at
+    runtime, so opening the admin view on the Pi is always instant. Missing
+    ffmpeg/Pillow, or a failed extraction, only produces a warning - it
+    never blocks config validation.
+    """
+    from .static_gen import DEFAULT_ASSETS_DIR
+    from .thumbnails import THUMBS_SUBDIR, ffmpeg_available, generate_admin_assets, pillow_available
+
+    if not ffmpeg_available() or not pillow_available():
+        print(
+            "admin-mode posters: skipped (needs ffmpeg and Pillow - "
+            "run `pip install .[pi]` / `sudo apt install ffmpeg`)"
+        )
+        return
+    cache_dir = (config.assets_dir or DEFAULT_ASSETS_DIR) / THUMBS_SUBDIR
+    result = generate_admin_assets(lineup, cache_dir)
+    if result is not None:
+        print(f"admin-mode posters: ready ({cache_dir})")
+    else:
+        print("admin-mode posters: could not be generated (see warnings above)")
 
 
 def _list_audio_devices() -> int:
