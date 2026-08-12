@@ -253,6 +253,53 @@ def test_admin_episode_list_highlights_selected_episode(tmp_path):
     assert "power back" in ass
 
 
+def test_admin_episode_list_scrolls_to_keep_selection_visible(tmp_path):
+    from nostalgiabox.channel import build_lineup
+    from nostalgiabox.overlay import _EPISODE_VISIBLE_ROWS
+
+    make_show(tmp_path, "b", 41)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 4, "name": "Bluey", "path": str(tmp_path / "b")}],
+        }
+    )
+    lineup = build_lineup(config)
+    channel = next(c for c in lineup if c.number == 4)
+    assert len(channel.episodes) == 41
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+
+    # Near the top: no "more above" hint, but there are more below.
+    om.show_admin_episode_list(channel, highlight_index=0)
+    ass = player.overlays[5]
+    assert "1.  " in ass
+    assert "\u25b2" not in ass  # nothing above yet
+    assert "\u25bc" in ass  # more below
+    assert "(1 of 41)" in ass
+
+    # Deep in the middle: the selected row's own label must actually be
+    # drawn (this is the bug that was reported - the cursor kept moving
+    # but the screen never scrolled to follow it).
+    om.show_admin_episode_list(channel, highlight_index=30)
+    ass = player.overlays[5]
+    assert "31.  " in ass
+    assert "\u25b2" in ass  # scrolled past the top now
+    assert "(31 of 41)" in ass
+
+    # Near the bottom: no "more below" hint since row 41 is the last one.
+    om.show_admin_episode_list(channel, highlight_index=40)
+    ass = player.overlays[5]
+    assert "41.  " in ass
+    assert "\u25b2" in ass
+    assert "\u25bc" not in ass
+    assert "(41 of 41)" in ass
+
+    # Sanity: the window never shows more rows than fit on screen.
+    row_lines = [ln for ln in ass.split("\n") if ln.split("}")[-1][:1].isdigit()]
+    assert len(row_lines) <= _EPISODE_VISIBLE_ROWS
+
+
 def test_admin_episode_list_and_browser_share_overlay_slot(tmp_path):
     from nostalgiabox.channel import build_lineup
 

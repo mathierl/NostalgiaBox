@@ -322,28 +322,65 @@ def _admin_browser_ass(lineup: "ChannelLineup", highlight_number: Optional[int])
     return "\n".join(parts)
 
 
+_EPISODE_ROW_H = 40
+_EPISODE_LIST_TOP = _IY0 + 96
+_EPISODE_LIST_BOTTOM = _IY1 - 44  # leave room for the footer hint below
+_EPISODE_VISIBLE_ROWS = max(1, (_EPISODE_LIST_BOTTOM - _EPISODE_LIST_TOP) // _EPISODE_ROW_H)
+
+
+def _episode_scroll_offset(total: int, highlight_index: Optional[int]) -> int:
+    """First visible row index for the episode list: keeps the highlighted
+    episode roughly centered in the visible window, clamped so the window
+    never scrolls past the start/end of the list. With few enough episodes
+    to fit on screen this is always 0 (no scrolling needed).
+    """
+    if total <= _EPISODE_VISIBLE_ROWS:
+        return 0
+    index = highlight_index or 0
+    offset = index - _EPISODE_VISIBLE_ROWS // 2
+    max_offset = total - _EPISODE_VISIBLE_ROWS
+    return max(0, min(offset, max_offset))
+
+
 def _admin_episode_list_ass(channel: "Channel", highlight_index: Optional[int]) -> str:
     """Full-screen numbered episode list for one channel: an opaque dark
     backdrop (there's no poster image behind this screen, unlike the show
     grid) plus a header, the numbered rows, and a footer hint.
+
+    Only :data:`_EPISODE_VISIBLE_ROWS` rows fit on screen at once, so long
+    lists scroll to keep the highlighted episode in view (see
+    :func:`_episode_scroll_offset`), with small "more above/below" hints
+    when the list is scrolled.
     """
     backdrop = _filled_rect(x=_FRAME_X0, y=0, w=_FRAME_W, h=CANVAS_H, fill=_ADMIN_BG)
     header = _escape(channel.name)
-    subheader = "Select an episode"
+    total = len(channel.episodes)
+    subheader = "Select an episode" if total <= 1 else f"Select an episode  ({(highlight_index or 0) + 1} of {total})"
     footer = "\u2191\u2193 move      mute select      power back"
 
     parts = [backdrop]
     parts.append(rf"{{\an7\pos({_IX0},{_IY0}){_admin_style(size=34)}}}{header}")
     parts.append(rf"{{\an7\pos({_IX0},{_IY0 + 44}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}{_escape(subheader)}")
 
-    row_h = 40
-    top = _IY0 + 96
-    for i, path in enumerate(channel.episodes):
+    offset = _episode_scroll_offset(total, highlight_index)
+    visible = channel.episodes[offset : offset + _EPISODE_VISIBLE_ROWS]
+    for row, path in enumerate(visible):
+        i = offset + row
         selected = i == highlight_index
-        y = top + i * row_h
+        y = _EPISODE_LIST_TOP + row * _EPISODE_ROW_H
         color = _ADMIN_WHITE if selected else _ADMIN_DIM
         label = f"{i + 1}.  {_episode_title(path)}"
         parts.append(rf"{{\an7\pos({_IX0},{y}){_admin_style(size=24, color=color, bold=selected)}}}{_escape(label)}")
+
+    if offset > 0:
+        hint = f"\u25b2 {offset} more"
+        parts.append(rf"{{\an7\pos({_IX0},{_EPISODE_LIST_TOP - 30}){_admin_style(size=16, color=_ADMIN_MUTED, bold=False)}}}{_escape(hint)}")
+    remaining = total - (offset + len(visible))
+    if remaining > 0:
+        hint = f"\u25bc {remaining} more"
+        y = _EPISODE_LIST_TOP + len(visible) * _EPISODE_ROW_H + 4
+        parts.append(rf"{{\an7\pos({_IX0},{y}){_admin_style(size=16, color=_ADMIN_MUTED, bold=False)}}}{_escape(hint)}")
+
     parts.append(rf"{{\an2\pos({_FRAME_CX},{_IY1}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}{_escape(footer)}")
     return "\n".join(parts)
 
