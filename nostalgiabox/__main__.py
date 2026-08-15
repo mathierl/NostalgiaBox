@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import __version__
-from .channel import build_lineup
+from .channel import build_game_channels, build_lineup
 from .config import Config, ConfigError, load_config
 
 log = logging.getLogger("nostalgiabox")
@@ -46,6 +46,7 @@ def _cmd_check(config: Config) -> int:
         return 2
 
     lineup = build_lineup(config)
+    games = build_game_channels(config)
     print(f"NostalgiaBox v{__version__} - configuration OK")
     print(f"tune-in mode: {config.tune_in}")
     if overrides:
@@ -59,19 +60,27 @@ def _cmd_check(config: Config) -> int:
         print(f"  CH {channel.number:>3}  {channel.name:<28} {count:>4} episodes{flag}")
     print(f"total episodes: {total}")
 
+    if games:
+        print(f"game systems ({len(games)}):")
+        for system in games:
+            count = len(system.episodes)
+            flag = "" if count else "   <-- NO ROMS FOUND"
+            print(f"  CH {system.number:>3}  {system.name:<28} {count:>4} games{flag}")
+
     if config.admin_mode_enabled:
-        _generate_admin_thumbnails(config, lineup)
+        _generate_admin_thumbnails(config, list(lineup) + games)
 
     return 0 if total > 0 else 1
 
 
-def _generate_admin_thumbnails(config: Config, lineup) -> None:
+def _generate_admin_thumbnails(config: Config, tiles) -> None:
     """(Re)generate the admin-mode show-grid poster art, best-effort.
 
     Runs as part of --check (and so scripts/install.sh) rather than at
     runtime, so opening the admin view on the Pi is always instant. Missing
     ffmpeg/Pillow, or a failed extraction, only produces a warning - it
-    never blocks config validation.
+    never blocks config validation. ``tiles`` is real channels and game
+    systems combined, same order the admin browse grid will show them in.
     """
     from .static_gen import DEFAULT_ASSETS_DIR
     from .thumbnails import THUMBS_SUBDIR, ffmpeg_available, generate_admin_assets, pillow_available
@@ -83,7 +92,7 @@ def _generate_admin_thumbnails(config: Config, lineup) -> None:
         )
         return
     cache_dir = (config.assets_dir or DEFAULT_ASSETS_DIR) / THUMBS_SUBDIR
-    result = generate_admin_assets(lineup, cache_dir)
+    result = generate_admin_assets(tiles, cache_dir)
     if result is not None:
         print(f"admin-mode posters: ready ({cache_dir})")
     else:

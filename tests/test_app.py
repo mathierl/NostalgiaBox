@@ -8,7 +8,7 @@ from nostalgiabox.player import END_EOF, MockPlayer
 from tests.helpers import FakeClock, make_show
 
 
-def build_app(tmp_path, *, assets_dir=None, **overrides):
+def build_app(tmp_path, *, assets_dir=None, game_launcher=None, player_factory=None, **overrides):
     for name in ("dragon", "arthur", "rugrats"):
         make_show(tmp_path, name, 4)
     data = {
@@ -32,6 +32,8 @@ def build_app(tmp_path, *, assets_dir=None, **overrides):
         InputManager([]),
         clock=clock,
         assets_dir=assets_dir,
+        game_launcher=game_launcher,
+        player_factory=player_factory,
     )
     return app, player, clock
 
@@ -507,3 +509,178 @@ def test_entering_standby_resets_admin_mode_browsing_and_pause(tmp_path):
     assert not app.paused
     assert app._pre_admin_path is None
     assert 5 not in player.overlays
+
+
+# -- games: admin-mode arcade via RetroArch (UKE-28) -------------------------
+# Games are a second kind of admin-grid tile, alongside real channels (see
+# TVApp._admin_tiles): a "system" (SNES) behaves like a channel, and its ROMs
+# behave like episodes, reusing the exact same 2D grid / numbered-list nav.
+# The one thing that's genuinely different is confirming a selection: a video
+# episode plays and exits back to normal viewing, but a game hands the
+# display to RetroArch (via the injectable game_launcher) and returns to
+# exactly the same game list - see TVApp._launch_game, de-risked on real
+# hardware by scripts/spike_mpv_retroarch_handoff.py before this was built.
+
+
+def _games_override(tmp_path, *, roms=2, ext=".sfc", core="/cores/snes9x.so"):
+    make_show(tmp_path, "snes", roms, ext=ext)
+    return {
+        "games": {
+            "systems": [
+                {"name": "SNES", "path": str(tmp_path / "snes"), "core": core, "extensions": [ext]}
+            ]
+        }
+    }
+
+
+def test_game_system_appears_in_admin_grid(tmp_path):
+    app, player, _ = build_app(tmp_path, **_games_override(tmp_path, roms=2))
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    panel = player.overlays.get(5, "")
+    assert "SNES" in panel
+    assert "2 games" in panel
+    assert app.games[0].number == 5  # continues on from the highest real channel (4)
+
+
+def test_can_navigate_onto_and_into_a_game_system(tmp_path):
+    app, player, _ = build_app(tmp_path, **_games_override(tmp_path))
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    # 2-col grid: row0=[2,3] row1=[4,5(SNES)]
+    send(app, Action.CHANNEL_DOWN)
+    assert app._browse_number == 4
+    send(app, Action.VOLUME_UP)
+    assert app._browse_number == 5
+    send(app, Action.MUTE)  # confirm SNES -> its game list
+    assert app.admin_episode_browsing
+    assert app._browse_episode_number == 5
+    panel = player.overlays.get(5, "")
+    assert "SNES" in panel and "Select a game" in panel
+
+
+def test_confirming_a_game_calls_the_launcher_and_stays_on_the_list(tmp_path):
+    calls = []
+
+    def fake_launcher(core, rom):
+        calls.append((core, rom))
+        return 0
+
+    app, player, _ = build_app(
+        tmp_path, game_launcher=fake_launcher, **_games_override(tmp_path, roms=2)
+    )
+    app.start()
+    playing = player.current
+    player.time_pos = 12.0
+    send(app, Action.ADMIN_TOGGLE)  # captures pre_admin_path/pos
+    send(app, Action.CHANNEL_DOWN)
+    send(app, Action.VOLUME_UP)  # cursor -> SNES (5)
+    send(app, Action.MUTE)  # into SNES's game list
+    rom = app.games[0].episodes[0]
+
+    send(app, Action.MUTE)  # confirm the first game
+
+    assert calls == [("/cores/snes9x.so", rom)]
+    # Stayed on exactly the same game list - unlike picking a show episode,
+    # nothing "started playing" in the mpv sense.
+    assert app.admin_episode_browsing
+    assert app._browse_episode_number == 5
+    assert app.admin_mode
+    # The video playing before admin mode opened is untouched by the game -
+    # launching a game must not clear the "nothing new is playing" resume state.
+    assert app._pre_admin_path == playing
+    assert app._pre_admin_pos == 12.0
+
+
+def test_confirming_a_second_game_works_after_returning_to_the_list(tmp_path):
+    calls = []
+    app, player, _ = build_app(
+        tmp_path,
+        game_launcher=lambda core, rom: calls.append(rom) or 0,
+        **_games_override(tmp_path, roms=2),
+    )
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.CHANNEL_DOWN)
+    send(app, Action.VOLUME_UP)
+    send(app, Action.MUTE)  # into SNES's game list
+    send(app, Action.MUTE)  # play game 1
+    send(app, Action.CHANNEL_DOWN)  # move to game 2
+    send(app, Action.MUTE)  # play game 2
+    assert calls == list(app.games[0].episodes)  # both, in order
+
+
+def test_game_launch_stops_and_recreates_player_via_factory(tmp_path):
+    created = []
+
+    def factory():
+        p = MockPlayer()
+        created.append(p)
+        return p
+
+    app, player1, _ = build_app(
+        tmp_path,
+        game_launcher=lambda core, rom: 0,
+        player_factory=factory,
+        **_games_override(tmp_path),
+    )
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.CHANNEL_DOWN)
+    send(app, Action.VOLUME_UP)
+    send(app, Action.MUTE)  # into SNES's game list
+    send(app, Action.MUTE)  # confirm and launch
+
+    assert player1.closed is True
+    assert len(created) == 1
+    assert app.player is created[0]
+    assert app.player is not player1
+    # volume/mute state carried over onto the freshly (re)created player
+    assert app.player.volume == app.volume
+    assert app.player.muted == app.muted
+
+
+def test_game_launch_without_a_player_factory_reuses_the_same_player(tmp_path):
+    # No factory (the common case in tests / a dry run) - the same player
+    # instance is kept, just close()d then reused for the grid image again.
+    app, player, _ = build_app(
+        tmp_path, game_launcher=lambda core, rom: 0, **_games_override(tmp_path)
+    )
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.CHANNEL_DOWN)
+    send(app, Action.VOLUME_UP)
+    send(app, Action.MUTE)
+    send(app, Action.MUTE)
+    assert app.player is player
+    assert player.closed is True
+
+
+def test_launch_game_with_no_core_configured_is_a_no_op(tmp_path):
+    # Not reachable through normal config (kind="game" requires 'core' - see
+    # config.py's ChannelConfig validation) - this exercises _launch_game's
+    # own defensive guard directly.
+    from nostalgiabox.channel import Channel
+    from nostalgiabox.config import ChannelConfig
+
+    calls = []
+    app, player, _ = build_app(tmp_path, game_launcher=lambda c, r: calls.append((c, r)))
+    bad_cfg = ChannelConfig(number=99, name="Broken", path=tmp_path)  # kind defaults to "show", core=None
+    channel = Channel(bad_cfg, [])
+    app._launch_game(channel, tmp_path / "rom.sfc")
+    assert calls == []
+    assert player.closed is False  # bailed out before touching the player
+
+
+def test_show_episodes_still_exit_admin_browsing_normally(tmp_path):
+    # Regression guard: mixing games into _admin_tiles/_confirm_episode_selection
+    # must not change how picking an ordinary show episode behaves.
+    app, player, _ = build_app(tmp_path, **_games_override(tmp_path))
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm Dragon Tales (still the first real channel)
+    send(app, Action.MUTE)  # confirm an episode
+    assert not app.admin_episode_browsing
+    assert not app.admin_browsing
+    assert app.admin_mode
+    assert player.current is not None

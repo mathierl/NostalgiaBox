@@ -222,6 +222,130 @@ def test_admin_mode_can_be_disabled_and_hold_seconds_clamped(tmp_path):
     assert cfg.admin_hold_seconds == 15.0  # clamped to the max
 
 
+# -- games (admin mode arcade, UKE-28) --------------------------------------
+
+
+def _base_channels(tmp_path):
+    make_show(tmp_path, "dragon", 1)
+    return {"channels": [{"number": 2, "name": "Dragon Tales", "path": str(tmp_path / "dragon")}]}
+
+
+def test_games_section_parsed(tmp_path):
+    make_show(tmp_path, "snes", 2, ext=".sfc")
+    make_show(tmp_path, "ps1", 1, ext=".cue")
+    data = {
+        **_base_channels(tmp_path),
+        "games": {
+            "systems": [
+                {
+                    "name": "SNES",
+                    "path": str(tmp_path / "snes"),
+                    "core": "/cores/snes9x.so",
+                    "extensions": [".sfc"],
+                },
+                {
+                    "name": "PS1",
+                    "path": str(tmp_path / "ps1"),
+                    "core": "/cores/pcsx.so",
+                    "extensions": ["cue"],  # no leading dot - should be normalised
+                },
+            ]
+        },
+    }
+    cfg = config_from_dict(data)
+    assert [g.name for g in cfg.games] == ["SNES", "PS1"]
+    assert [g.kind for g in cfg.games] == ["game", "game"]
+    # numbers continue on from the last real channel (2) by default
+    assert [g.number for g in cfg.games] == [3, 4]
+    assert cfg.games[0].core == "/cores/snes9x.so"
+    assert cfg.games[0].extensions == (".sfc",)
+    assert cfg.games[1].extensions == (".cue",)
+
+
+def test_games_section_explicit_number(tmp_path):
+    make_show(tmp_path, "snes", 1, ext=".sfc")
+    data = {
+        **_base_channels(tmp_path),
+        "games": {
+            "systems": [
+                {
+                    "number": 50,
+                    "name": "SNES",
+                    "path": str(tmp_path / "snes"),
+                    "core": "core.so",
+                    "extensions": [".sfc"],
+                }
+            ]
+        },
+    }
+    cfg = config_from_dict(data)
+    assert cfg.games[0].number == 50
+
+
+def test_no_games_section_defaults_to_empty(tmp_path):
+    cfg = config_from_dict(_base_channels(tmp_path))
+    assert cfg.games == ()
+
+
+def test_games_missing_core_rejected(tmp_path):
+    make_show(tmp_path, "snes", 1, ext=".sfc")
+    data = {
+        **_base_channels(tmp_path),
+        "games": {"systems": [{"name": "SNES", "path": str(tmp_path / "snes"), "extensions": [".sfc"]}]},
+    }
+    with pytest.raises(ConfigError, match="core"):
+        config_from_dict(data)
+
+
+def test_games_missing_extensions_rejected(tmp_path):
+    make_show(tmp_path, "snes", 1, ext=".sfc")
+    data = {
+        **_base_channels(tmp_path),
+        "games": {"systems": [{"name": "SNES", "path": str(tmp_path / "snes"), "core": "core.so"}]},
+    }
+    with pytest.raises(ConfigError, match="extensions"):
+        config_from_dict(data)
+
+
+def test_games_missing_path_rejected(tmp_path):
+    data = {
+        **_base_channels(tmp_path),
+        "games": {"systems": [{"name": "SNES", "core": "core.so", "extensions": [".sfc"]}]},
+    }
+    with pytest.raises(ConfigError, match="path"):
+        config_from_dict(data)
+
+
+def test_game_and_channel_sharing_a_number_rejected(tmp_path):
+    make_show(tmp_path, "snes", 1, ext=".sfc")
+    data = {
+        **_base_channels(tmp_path),  # channel number 2
+        "games": {
+            "systems": [
+                {"number": 2, "name": "SNES", "path": str(tmp_path / "snes"), "core": "core.so", "extensions": [".sfc"]}
+            ]
+        },
+    }
+    with pytest.raises(ConfigError, match="duplicate channel number"):
+        config_from_dict(data)
+
+
+def test_game_channel_config_rejects_bad_kind(tmp_path):
+    from nostalgiabox.config import ChannelConfig
+
+    with pytest.raises(ConfigError, match="kind"):
+        ChannelConfig(number=1, name="Bad", path=tmp_path, kind="movie")
+
+
+def test_game_channel_config_requires_core_and_extensions(tmp_path):
+    from nostalgiabox.config import ChannelConfig
+
+    with pytest.raises(ConfigError, match="core"):
+        ChannelConfig(number=1, name="SNES", path=tmp_path, kind="game", extensions=(".sfc",))
+    with pytest.raises(ConfigError, match="extensions"):
+        ChannelConfig(number=1, name="SNES", path=tmp_path, kind="game", core="core.so")
+
+
 def test_gpu_context_defaults_to_drm_and_can_be_disabled(tmp_path):
     make_show(tmp_path, "a", 1)
     data = {"channels": [{"path": str(tmp_path / "a")}]}

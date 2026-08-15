@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Sequence
 
 from .channel import Channel, ChannelLineup
 from .config import Config, UiConfig
@@ -106,14 +106,16 @@ class OverlayManager:
         self._expiry.pop(_ID_ADMIN, None)  # persistent until cleared
 
     def show_admin_browser(
-        self, lineup: "ChannelLineup", *, highlight_number: Optional[int]
+        self, tiles: Sequence["Channel"], *, highlight_number: Optional[int]
     ) -> None:
         """Highlight ring, title/subtitle labels and header/footer text drawn
         on top of the real poster-grid background image (see
         :mod:`nostalgiabox.thumbnails` and :class:`nostalgiabox.app.TVApp`,
         which swaps the player onto that image before calling this).
+        ``tiles`` is real channels and game systems combined (see
+        :meth:`nostalgiabox.app.TVApp._admin_tiles`), in display order.
         """
-        ass = _admin_browser_ass(lineup, highlight_number)
+        ass = _admin_browser_ass(tiles, highlight_number)
         self._player.set_overlay(_ID_ADMIN, ass, CANVAS_W, CANVAS_H)
         self._expiry.pop(_ID_ADMIN, None)  # persistent until cleared
 
@@ -294,13 +296,14 @@ def _admin_panel_ass(lineup: "ChannelLineup", paused: bool, ui: UiConfig) -> str
     return "\n".join(parts)
 
 
-def _admin_browser_ass(lineup: "ChannelLineup", highlight_number: Optional[int]) -> str:
-    """Header, per-channel title/episode-count labels (positioned to sit right
-    under each poster - see :func:`nostalgiabox.thumbnails.admin_grid_tile_rect`
-    - a highlight ring around the selected one, and a footer hint. The posters
-    themselves are the background image this draws on top of, not drawn here.
+def _admin_browser_ass(tiles: "Sequence[Channel]", highlight_number: Optional[int]) -> str:
+    """Header, per-tile title/count labels (positioned to sit right under
+    each poster - see :func:`nostalgiabox.thumbnails.admin_grid_tile_rect`
+    - a highlight ring around the selected one, and a footer hint. The
+    posters themselves are the background image this draws on top of, not
+    drawn here. ``tiles`` is real channels and game systems combined.
     """
-    channels = list(lineup)
+    channels = list(tiles)
     header = "Select a channel"
     footer = "\u2190\u2191\u2193\u2192 move      mute select      hold power exit"
 
@@ -312,14 +315,21 @@ def _admin_browser_ass(lineup: "ChannelLineup", highlight_number: Optional[int])
         if selected:
             parts.append(_outline_rect(x=x - 4, y=y - 4, w=w + 8, h=h + 8, color=_ADMIN_WHITE, thickness=3))
         count = len(channel.episodes)
-        ep_label = "ep" if count == 1 else "eps"
+        subtitle = f"{count} {_item_label(channel, count)}"
         title = f"CH {channel.number:02d}  {channel.name}"
-        subtitle = f"{count} {ep_label}"
         title_color = _ADMIN_WHITE if selected else _ADMIN_DIM
         parts.append(rf"{{\an7\pos({x},{y + h + 8}){_admin_style(size=22, color=title_color)}}}{_escape(title)}")
         parts.append(rf"{{\an7\pos({x},{y + h + 34}){_admin_style(size=18, color=_ADMIN_MUTED, bold=False)}}}{_escape(subtitle)}")
     parts.append(rf"{{\an2\pos({_FRAME_CX},{_IY1}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}{_escape(footer)}")
     return "\n".join(parts)
+
+
+def _item_label(channel: "Channel", count: int) -> str:
+    """'ep'/'eps' for a show, 'game'/'games' for a game system - the noun the
+    count on a browse tile/list refers to."""
+    if channel.config.kind == "game":
+        return "game" if count == 1 else "games"
+    return "ep" if count == 1 else "eps"
 
 
 _EPISODE_ROW_H = 40
@@ -355,7 +365,8 @@ def _admin_episode_list_ass(channel: "Channel", highlight_index: Optional[int]) 
     backdrop = _filled_rect(x=_FRAME_X0, y=0, w=_FRAME_W, h=CANVAS_H, fill=_ADMIN_BG)
     header = _escape(channel.name)
     total = len(channel.episodes)
-    subheader = "Select an episode" if total <= 1 else f"Select an episode  ({(highlight_index or 0) + 1} of {total})"
+    verb = "Select a game" if channel.config.kind == "game" else "Select an episode"
+    subheader = verb if total <= 1 else f"{verb}  ({(highlight_index or 0) + 1} of {total})"
     footer = "\u2191\u2193 move      mute select      power back"
 
     parts = [backdrop]

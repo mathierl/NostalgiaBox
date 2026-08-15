@@ -28,9 +28,9 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
-from .channel import Channel, ChannelLineup
+from .channel import Channel
 from .probe import DEFAULT_EPISODE_SECONDS, probe_duration
 
 log = logging.getLogger(__name__)
@@ -125,9 +125,12 @@ def ensure_channel_poster(
 ) -> Optional[Path]:
     """Return a cached poster for ``channel``, (re)generating it if the
     source episode is newer than the cached poster (or there isn't one yet).
-    Returns None if the channel has no episodes or ffmpeg is unavailable.
+    Returns None if the channel has no episodes, ffmpeg is unavailable, or
+    it's a game channel (a ROM file isn't something ffmpeg can grab a frame
+    from - compose_show_grid falls back to a plain placeholder tile for
+    these, same as it does for any channel with no poster).
     """
-    if channel.is_empty:
+    if channel.is_empty or channel.config.kind == "game":
         return None
     source = channel.episodes[0]
     out_path = cache_dir / f"channel-{channel.number:02d}-{_slugify(channel.name)}.jpg"
@@ -154,10 +157,10 @@ def ensure_channel_poster(
 
 
 def ensure_all_posters(
-    lineup: ChannelLineup, cache_dir: Path, *, force: bool = False
+    tiles: Sequence[Channel], cache_dir: Path, *, force: bool = False
 ) -> Dict[int, Path]:
     posters: Dict[int, Path] = {}
-    for channel in lineup:
+    for channel in tiles:
         poster = ensure_channel_poster(channel, cache_dir, force=force)
         if poster is not None:
             posters[channel.number] = poster
@@ -177,19 +180,21 @@ def _cover_resize(img, width: int, height: int):
 
 
 def compose_show_grid(
-    lineup: ChannelLineup, posters: Dict[int, Path], out_path: Path
+    tiles: Sequence[Channel], posters: Dict[int, Path], out_path: Path
 ) -> Optional[Path]:
     """Render the full show-grid background image: dark backdrop plus every
-    channel's poster (or a plain placeholder tile if it has none), positioned
-    via :func:`admin_grid_tile_rect` so overlay.py's highlight ring and text
-    line up with it exactly.
+    channel's poster (or a plain placeholder tile if it has none - this is
+    what every game-system tile gets, since a ROM has no frame to grab),
+    positioned via :func:`admin_grid_tile_rect` so overlay.py's highlight
+    ring and text line up with it exactly. ``tiles`` is real channels and
+    game systems combined, in the order they should appear in the grid.
     """
     if not pillow_available():
         log.warning("Pillow not available; cannot compose the admin show grid")
         return None
     from PIL import Image
 
-    channels = list(lineup)
+    channels = list(tiles)
     bg = Image.new("RGB", (_GRID_W, _GRID_H), _BG_COLOR)
     for i, channel in enumerate(channels):
         x, y, w, h = admin_grid_tile_rect(i, len(channels))
@@ -211,15 +216,17 @@ def compose_show_grid(
 
 
 def generate_admin_assets(
-    lineup: ChannelLineup, cache_dir: Path, *, force: bool = False
+    tiles: Sequence[Channel], cache_dir: Path, *, force: bool = False
 ) -> Optional[Path]:
     """Top-level entry point used by ``--check``: (re)generate any missing/
     stale channel posters, then compose the full show-grid background.
     Best-effort throughout - returns None (and logs a warning) rather than
     raising, so a missing ffmpeg/Pillow never breaks config validation.
+    ``tiles`` is real channels and game systems combined (see
+    ``nostalgiabox.app.TVApp._admin_tiles``).
     """
-    posters = ensure_all_posters(lineup, cache_dir, force=force)
-    return compose_show_grid(lineup, posters, cache_dir / GRID_FILENAME)
+    posters = ensure_all_posters(tiles, cache_dir, force=force)
+    return compose_show_grid(tiles, posters, cache_dir / GRID_FILENAME)
 
 
 __all__ = [

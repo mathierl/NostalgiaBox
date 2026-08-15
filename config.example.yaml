@@ -138,6 +138,28 @@ scan_recursive: true      # also look inside season sub-folders for episodes
 admin_mode_enabled: true    # set false to remove the feature entirely
 admin_hold_seconds: 3.0     # how long to hold Power to trigger it (0.5-15)
 
+# --- Games (optional) ---------------------------------------------------------
+# Emulated game systems, launched via RetroArch, browsed the same way as
+# channels: each system is a tile in the admin grid, its ROMs a numbered list
+# inside it. Games never appear on the kid-facing remote - only inside admin
+# mode, alongside real channels. Needs RetroArch and the relevant libretro
+# core(s) installed on the Pi (see the project wiki/README for setup). Numbers
+# default to continuing on right after your last real channel, or set them
+# explicitly ('number:') same as a channel.
+# games:
+#   systems:
+#     - name: SNES
+#       path: /media/nostalgiabox-roms/snes
+#       core: /usr/lib/aarch64-linux-gnu/libretro/snes9x_libretro.so
+#       extensions: [".sfc", ".smc"]
+#     - name: PS1
+#       path: /media/nostalgiabox-roms/ps1
+#       core: ~/.config/retroarch/cores/pcsx_rearmed_libretro.so
+#       extensions: [".cue", ".chd"]
+#       # PS1 also needs a BIOS dump in RetroArch's own system directory
+#       # (~/.config/retroarch/system/), dumped from your own PS1 console -
+#       # this isn't something NostalgiaBox manages.
+
 # --- Remote control input ----------------------------------------------------
 # All backends are auto-detected; anything unavailable is skipped, so these are
 # only needed to turn things off or fine-tune device selection.

@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 
 # Video containers we consider "an episode" when scanning a channel folder.
@@ -67,7 +67,16 @@ class CrtConfig:
 
 @dataclass(frozen=True)
 class ChannelConfig:
-    """A single television channel backed by a folder of episodes."""
+    """A single television channel backed by a folder of episodes.
+
+    ``kind="game"`` repurposes the same shape for a game system (see
+    ``games:`` in the top-level config / UKE-28): ``path`` becomes a ROM
+    folder, ``episodes`` (built by ``build_game_channels``) become ROM files,
+    and ``core``/``extensions`` say how to run and find them. Game channels
+    are never placed in the real :class:`~nostalgiabox.channel.ChannelLineup`
+    a kid can tune to - they only ever appear in the admin-mode browse grid,
+    alongside real "show" channels - see ``nostalgiabox.app.TVApp._admin_tiles``.
+    """
 
     number: int
     name: str
@@ -78,12 +87,24 @@ class ChannelConfig:
     # a set of season numbers detected from the path (e.g. S06E01, "Season 6").
     exclude: tuple[str, ...] = ()
     exclude_seasons: frozenset[int] = frozenset()
+    kind: str = "show"                   # "show" | "game"
+    core: Optional[str] = None           # libretro core .so path - required for "game"
+    extensions: tuple[str, ...] = ()     # ROM extensions - required for "game"
 
     def __post_init__(self) -> None:
         if self.number < 0:
             raise ConfigError(f"channel number must be >= 0, got {self.number}")
         if not self.name:
             raise ConfigError(f"channel {self.number} is missing a name")
+        if self.kind not in ("show", "game"):
+            raise ConfigError(
+                f"channel {self.number} has invalid kind {self.kind!r} (must be 'show' or 'game')"
+            )
+        if self.kind == "game":
+            if not self.core:
+                raise ConfigError(f"game channel {self.number} ({self.name}) is missing 'core'")
+            if not self.extensions:
+                raise ConfigError(f"game channel {self.number} ({self.name}) is missing 'extensions'")
 
 
 @dataclass(frozen=True)
@@ -91,6 +112,10 @@ class Config:
     """Top-level configuration for the whole nostalgia box."""
 
     channels: List[ChannelConfig]
+    # Game systems (see ChannelConfig's docstring / UKE-28) - kept separate
+    # from `channels` since they never enter the real tuner, only the admin
+    # browse grid.
+    games: tuple[ChannelConfig, ...] = ()
     video_extensions: tuple[str, ...] = DEFAULT_VIDEO_EXTENSIONS
     tune_in: str = "random"
     start_channel: Optional[int] = None
@@ -222,6 +247,58 @@ def _parse_channels(raw: Any, base: Optional[Path], default_shuffle: bool) -> Li
     return channels
 
 
+def _parse_games(raw: Any, base: Optional[Path], *, start_number: int) -> tuple[ChannelConfig, ...]:
+    """Parse the top-level 'games' section into ``kind="game"`` ChannelConfigs.
+
+    Mirrors ``_parse_channels`` but each entry additionally requires 'core'
+    (the libretro core .so to run it with) and 'extensions' (ROM file
+    extensions for that system, since different systems use different ones -
+    unlike shows there's no single global list). Numbers default to
+    continuing on from the last real channel number, but can be set
+    explicitly per system, same as channels.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, dict):
+        raise ConfigError("'games' must be a mapping")
+    systems_raw = raw.get("systems")
+    if not systems_raw:
+        return ()
+    if not isinstance(systems_raw, list):
+        raise ConfigError("'games.systems' must be a list")
+
+    systems: List[ChannelConfig] = []
+    next_number = start_number
+    for i, entry in enumerate(systems_raw):
+        if not isinstance(entry, dict):
+            raise ConfigError(f"game system #{i} must be a mapping, got {type(entry).__name__}")
+        if "path" not in entry:
+            raise ConfigError(f"game system #{i} is missing required key 'path'")
+        if "core" not in entry:
+            raise ConfigError(f"game system #{i} is missing required key 'core'")
+        exts_raw = entry.get("extensions")
+        if not exts_raw:
+            raise ConfigError(f"game system #{i} is missing required key 'extensions'")
+
+        name = entry.get("name") or _prettify_name(Path(str(entry["path"])).name)
+        number = int(entry["number"]) if "number" in entry else next_number
+        extensions = _parse_str_list(exts_raw, "extensions")
+        extensions = tuple(e if e.startswith(".") else f".{e}" for e in (s.lower() for s in extensions))
+
+        systems.append(
+            ChannelConfig(
+                number=number,
+                name=str(name),
+                path=_as_path(entry["path"], base),
+                kind="game",
+                core=str(entry["core"]),
+                extensions=extensions,
+            )
+        )
+        next_number = number + 1
+    return tuple(systems)
+
+
 def _parse_str_list(raw: Any, name: str) -> tuple[str, ...]:
     if raw is None:
         return ()
@@ -292,7 +369,12 @@ def config_from_dict(data: Dict[str, Any], *, base_dir: Optional[Path] = None) -
     if not channels:
         raise ConfigError("no channels found - check 'channels' or the folders under 'media_root'")
 
-    _ensure_unique_numbers(channels)
+    games = _parse_games(
+        data.get("games"),
+        media_root or base_dir,
+        start_number=max((c.number for c in channels), default=1) + 1,
+    )
+    _ensure_unique_numbers(list(channels) + list(games))
 
     tune_in = str(data.get("tune_in", "random")).lower()
     if tune_in not in TUNE_IN_MODES:
@@ -321,6 +403,7 @@ def config_from_dict(data: Dict[str, Any], *, base_dir: Optional[Path] = None) -
 
     return Config(
         channels=channels,
+        games=games,
         video_extensions=extensions,
         tune_in=tune_in,
         start_channel=start_channel,
@@ -437,7 +520,11 @@ def _valid_color(value: Any, name: str) -> str:
     return s if s.startswith("#") else f"#{s}"
 
 
-def _ensure_unique_numbers(channels: List[ChannelConfig]) -> None:
+def _ensure_unique_numbers(channels: Sequence[ChannelConfig]) -> None:
+    """Check number uniqueness across a combined channels+games sequence -
+    a game system and a real channel sharing a number is just as broken as
+    two real channels sharing one, since both live in the same admin grid.
+    """
     seen: Dict[int, str] = {}
     for ch in channels:
         if ch.number in seen:

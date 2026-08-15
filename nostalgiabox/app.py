@@ -19,10 +19,10 @@ import queue
 import subprocess
 import time
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 from .actions import Action, InputEvent
-from .channel import Channel, ChannelLineup, PlayRequest, build_lineup
+from .channel import Channel, ChannelLineup, PlayRequest, build_game_channels, build_lineup
 from .config import Config
 from .input.manager import InputManager, create_backends
 from .overlay import OverlayManager
@@ -37,6 +37,39 @@ from .static_gen import (
 log = logging.getLogger(__name__)
 
 
+def _build_mpv_player(config: Config, assets_dir: Path) -> Player:
+    """Construct a real MpvPlayer from config - factored out of from_config so
+    it can also be used as a *factory*, called again later to reopen mpv
+    after a game launch hands the display back (see TVApp._launch_game and
+    scripts/spike_mpv_retroarch_handoff.py, which confirmed this handoff is
+    safe on real hardware - UKE-28).
+    """
+    from .crt import write_shader
+    from .player import MpvPlayer
+
+    shader_path = write_shader(config.crt)
+    return MpvPlayer(
+        glsl_shaders=str(shader_path) if shader_path else None,
+        fonts_dir=assets_dir / "fonts",
+        force_4_3=config.force_4_3,
+        audio_device=config.audio_device,
+        gpu_context=config.gpu_context,
+    )
+
+
+def _default_game_launcher(core: str, rom: Path) -> int:
+    """Run a game to completion via bare RetroArch, blocking until it exits
+    (normally via its own F1 -> Quit RetroArch). A failed launch should never
+    crash the box, so any exception is caught and treated as a non-zero exit.
+    """
+    try:
+        result = subprocess.run(["retroarch", "-L", core, str(rom)])
+        return result.returncode
+    except Exception:  # noqa: BLE001
+        log.exception("failed to launch game: core=%s rom=%s", core, rom)
+        return 1
+
+
 class TVApp:
     """The retro-TV application state machine."""
 
@@ -49,14 +82,27 @@ class TVApp:
         overlay: Optional[OverlayManager] = None,
         clock: Callable[[], float] = time.monotonic,
         assets_dir: Optional[Path] = None,
+        player_factory: Optional[Callable[[], Player]] = None,
+        game_launcher: Optional[Callable[[str, Path], int]] = None,
     ) -> None:
         self.config = config
         self.player = player
         self.input = input_manager
         self.overlay = overlay or OverlayManager(player, config, clock=clock)
         self._clock = clock
+        # Rebuilds a fresh Player after a game hands the display back (see
+        # _launch_game) - only set for real hardware (from_config); with no
+        # factory (dry-run / most tests) the same player instance is reused,
+        # which is fine for MockPlayer and for anything that never launches
+        # a game.
+        self._player_factory = player_factory
+        self._game_launcher = game_launcher or _default_game_launcher
 
         self.lineup: ChannelLineup = build_lineup(config)
+        # Game systems (see UKE-28): shown in the admin browse grid alongside
+        # real channels (_admin_tiles), but never part of self.lineup - the
+        # kid-facing tuner must never be able to land on one.
+        self.games: List[Channel] = build_game_channels(config)
 
         # Runtime state.
         self.volume = config.initial_volume
@@ -130,22 +176,16 @@ class TVApp:
         backends (a stdin backend is added if a TTY is available), which is how
         the box can be exercised on a development machine.
         """
+        player_factory = None
         if player is None:
             if dry_run:
                 player = MockPlayer(verbose=True)
             else:
-                from .crt import write_shader
-                from .player import MpvPlayer
-
                 assets = assets_dir or config.assets_dir or DEFAULT_ASSETS_DIR
-                shader_path = write_shader(config.crt)
-                player = MpvPlayer(
-                    glsl_shaders=str(shader_path) if shader_path else None,
-                    fonts_dir=assets / "fonts",
-                    force_4_3=config.force_4_3,
-                    audio_device=config.audio_device,
-                    gpu_context=config.gpu_context,
-                )
+                player = _build_mpv_player(config, assets)
+                # Lets _launch_game reopen mpv with the exact same options
+                # after a game hands the display back.
+                player_factory = lambda: _build_mpv_player(config, assets)
 
         if input_manager is None:
             if dry_run:
@@ -159,7 +199,9 @@ class TVApp:
                 )
             input_manager = InputManager(backends)
 
-        return cls(config, player, input_manager, assets_dir=assets_dir)
+        return cls(
+            config, player, input_manager, assets_dir=assets_dir, player_factory=player_factory
+        )
 
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> None:
@@ -474,14 +516,24 @@ class TVApp:
                 self.overlay.show_admin_episode_list(channel, highlight_index=self._browse_episode_index)
             return
         if self.admin_browsing:
-            self.overlay.show_admin_browser(self.lineup, highlight_number=self._browse_number)
+            self.overlay.show_admin_browser(self._admin_tiles(), highlight_number=self._browse_number)
             return
         self.overlay.show_admin_panel(self.lineup, paused=self.paused)
+
+    def _admin_tiles(self) -> List[Channel]:
+        """Every tile the admin browse grid shows: real channels, then game
+        systems, in that order. Games are never part of self.lineup - see
+        __init__ - this combined view exists only for the admin browse
+        screens (the small corner panel from show_admin_panel stays
+        channels-only, deliberately, since it's shown while actively
+        watching, not browsing).
+        """
+        return list(self.lineup) + list(self.games)
 
     def _channel_by_number(self, number: Optional[int]) -> Optional[Channel]:
         if number is None:
             return None
-        return next((c for c in self.lineup if c.number == number), None)
+        return next((c for c in self._admin_tiles() if c.number == number), None)
 
     def _admin_thumbs_cache_dir(self) -> Path:
         from .thumbnails import THUMBS_SUBDIR
@@ -507,7 +559,7 @@ class TVApp:
     def _move_browse_cursor(self, *, drow: int = 0, dcol: int = 0) -> None:
         from .thumbnails import GRID_COLS
 
-        numbers = self.lineup.numbers
+        numbers = [c.number for c in self._admin_tiles()]
         if not numbers:
             return
         cols = GRID_COLS if len(numbers) > 1 else 1
@@ -553,14 +605,53 @@ class TVApp:
         self._refresh_admin_panel()
 
     def _confirm_episode_selection(self) -> None:
-        self.admin_episode_browsing = False
         channel = self._channel_by_number(self._browse_episode_number)
-        if channel is not None and 0 <= self._browse_episode_index < len(channel.episodes):
+        has_selection = channel is not None and 0 <= self._browse_episode_index < len(channel.episodes)
+
+        if has_selection and channel.config.kind == "game":
+            # Games hand off to RetroArch and land back on this exact game
+            # list - nothing "starts playing" in the mpv sense, so unlike a
+            # show episode, admin_episode_browsing is left untouched (see
+            # _launch_game).
+            self._launch_game(channel, channel.episodes[self._browse_episode_index])
+            self._refresh_admin_panel()
+            return
+
+        self.admin_episode_browsing = False
+        if has_selection:
             episode_path = channel.episodes[self._browse_episode_index]
             self._play_specific_episode(channel.number, episode_path)
             self._pre_admin_path = None  # something new is playing; nothing to resume
         self._browse_number = self.lineup.current.number
         self._refresh_admin_panel()
+
+    def _launch_game(self, channel: Channel, rom_path: Path) -> None:
+        """Hand the display to RetroArch for one game, then return to
+        exactly the admin browse screen the game was launched from.
+
+        Confirmed safe on real hardware by
+        scripts/spike_mpv_retroarch_handoff.py (UKE-28): closing mpv
+        releases the DRM master fast enough for RetroArch to get a picture,
+        and a fresh MpvPlayer reopens cleanly afterward - repeatedly, not
+        just once.
+        """
+        core = channel.config.core
+        if not core:
+            log.warning("game channel %r has no core configured; not launching", channel.name)
+            return
+        self.player.close()
+        try:
+            self._game_launcher(core, rom_path)
+        finally:
+            if self._player_factory is not None:
+                self.player = self._player_factory()
+                self.player.on_end = self._ended.put
+                self.player.set_volume(self.volume)
+                self.player.set_mute(self.muted)
+            # Back to browsing: re-arm the poster-grid loop image (the same
+            # thing _toggle_admin_mode does on entry) so the episode-list/
+            # grid overlay has its usual backdrop again.
+            self._show_admin_grid_background()
 
     def _play_specific_episode(self, channel_number: int, episode_path: Path) -> None:
         """Play exactly this episode (picked from the admin episode list),

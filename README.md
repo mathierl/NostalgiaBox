@@ -301,6 +301,21 @@ A couple of notes:
 - In `--dry-run` dev mode on a laptop keyboard, press **a** instead of timing
   a hold.
 
+#### Games (arcade)
+
+If you've configured a `games:` section (see `config.example.yaml`), emulated
+game systems show up as extra tiles in the same show grid, browsed exactly
+the same way - a system (e.g. "SNES") behaves like a channel, and its ROMs
+behave like episodes, right down to the same 2D grid and numbered-list nav.
+
+The one thing that's different: confirming a ROM doesn't play it inline like
+a video episode. It hands the screen to RetroArch - mpv closes, RetroArch
+runs the game full-screen until you quit it from RetroArch's own menu (F1 by
+default), and you land right back on the same game list, ready to pick
+another one. This needs RetroArch and the relevant libretro core(s) already
+installed on the Pi; NostalgiaBox just launches `retroarch -L <core> <rom>`
+and waits.
+
 ---
 
 ## Updating later
@@ -333,6 +348,13 @@ initial_volume: 70       # 0-100
 admin_mode_enabled: true # hidden grown-ups view (posters, episode picker, pause/play)
 admin_hold_seconds: 3.0  # how long to hold Power to open it
 audio_device: "..."      # force HDMI audio (see Part H)
+
+games:                   # optional: emulated systems, browsed alongside channels in admin mode
+  systems:
+    - name: SNES
+      path: /media/nostalgiabox-roms/snes
+      core: /path/to/snes9x_libretro.so
+      extensions: [".sfc", ".smc"]
 
 ui:                      # the green on-screen display
   color: "#4DFF5A"

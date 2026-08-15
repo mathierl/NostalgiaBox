@@ -311,6 +311,31 @@ class ChannelLineup:
         return self.current
 
 
+def build_game_channels(config: Config) -> List[Channel]:
+    """Scan every configured game system's ROM folder into a Channel-shaped
+    object (``kind="game"`` - see ``ChannelConfig``'s docstring).
+
+    Deliberately returns a plain list, not a :class:`ChannelLineup`: these are
+    never meant to be tunable the way real channels are (no up/down
+    navigation, no tune_in/advance/broadcast behaviour - none of that makes
+    sense for a ROM folder, and more importantly a kid using the remote must
+    never be able to land on one by flipping channels). They exist only for
+    the admin-mode browse grid to show alongside real channels - see
+    :meth:`nostalgiabox.app.TVApp._admin_tiles`.
+    """
+    systems: List[Channel] = []
+    for g_cfg in config.games:
+        roms = scan_episodes(g_cfg.path, g_cfg.extensions, recursive=config.scan_recursive)
+        if not roms:
+            log.warning(
+                "game system %s (%s) has no ROMs in %s", g_cfg.number, g_cfg.name, g_cfg.path
+            )
+        # tune_in/rng are irrelevant here (never called for a game channel)
+        # but Channel requires them; "random" is just an inert default.
+        systems.append(Channel(g_cfg, roms, tune_in="random"))
+    return systems
+
+
 def build_lineup(config: Config, *, rng: Optional[random.Random] = None) -> ChannelLineup:
     """Scan every configured channel folder and build the full lineup."""
     base_rng = rng or random.Random(config.shuffle_seed)
@@ -356,4 +381,5 @@ __all__ = [
     "scan_episodes",
     "detect_season",
     "build_lineup",
+    "build_game_channels",
 ]
