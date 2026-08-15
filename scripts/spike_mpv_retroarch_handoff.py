@@ -27,10 +27,18 @@ nostalgiabox.service stopped first so nothing else is holding the display:
 
     sudo systemctl stop nostalgiabox
     python3 scripts/spike_mpv_retroarch_handoff.py \\
-        --core ~/.config/retroarch/cores/snes9x_libretro.so \\
-        --rom /path/to/game.sfc \\
-        --media /path/to/any/video/or/image/mpv/can/loop \\
+        --core /usr/lib/aarch64-linux-gnu/libretro/snes9x_libretro.so \\
+        --rom ~/roms/snes/Donkey\\ Kong\\ Country.sfc \\
+        --media ~/media/<some-show>/<some-episode>.mp4 \\
         --audio-device plughw:CARD=vc4hdmi0,DEV=0
+
+(PS1's pcsx_rearmed core is the one fetched by hand into
+~/.config/retroarch/cores/ - use that path instead if testing PS1.)
+
+Add --mute to run silently (mutes mpv, and disables RetroArch's audio driver
+for just this run via a throwaway --appendconfig file - your real
+retroarch.cfg is never touched). Only the DRM/picture handoff is actually
+under test here, so muting doesn't compromise what we're checking.
 
 Watch the TV, not just the terminal - this script can only report what mpv
 and RetroArch's exit codes say, not whether picture/audio actually appeared.
@@ -42,6 +50,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -49,7 +58,7 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def open_mpv(media_path: str, *, audio_device: str | None, gpu_context: str):
+def open_mpv(media_path: str, *, audio_device: str | None, gpu_context: str, mute: bool):
     import mpv  # type: ignore
 
     options = dict(
@@ -68,6 +77,8 @@ def open_mpv(media_path: str, *, audio_device: str | None, gpu_context: str):
         options["audio_device"] = audio_device
     if gpu_context:
         options["gpu_context"] = gpu_context
+    if mute:
+        options["mute"] = "yes"
 
     player = mpv.MPV(**options)
     player.loop_file = "inf"
@@ -86,11 +97,32 @@ def close_mpv(player) -> None:
     log(f"   mpv.terminate() returned after {dt:.2f}s")
 
 
-def run_retroarch(core: str, rom: str) -> int:
+def run_retroarch(core: str, rom: str, *, mute: bool) -> int:
     cmd = ["retroarch", "-L", core, rom]
+    appendconfig_path = None
+    if mute:
+        # A throwaway --appendconfig file overrides audio_enable for just this
+        # process - never touches the real retroarch.cfg on disk.
+        fh = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".cfg", prefix="spike-mute-", delete=False
+        )
+        fh.write('audio_enable = "false"\n')
+        fh.close()
+        appendconfig_path = fh.name
+        cmd += ["--appendconfig", appendconfig_path]
+
     log(f"   launching: {' '.join(cmd)}")
     t0 = time.monotonic()
-    result = subprocess.run(cmd)
+    try:
+        result = subprocess.run(cmd)
+    finally:
+        if appendconfig_path:
+            import os
+
+            try:
+                os.unlink(appendconfig_path)
+            except OSError:
+                pass
     dt = time.monotonic() - t0
     log(f"   retroarch exited (code {result.returncode}) after {dt:.1f}s")
     return result.returncode
@@ -117,6 +149,12 @@ def main() -> None:
         help="seconds to sleep after mpv.terminate() before launching RetroArch, "
         "to test whether a delay is what makes this reliable",
     )
+    parser.add_argument(
+        "--mute", action="store_true",
+        help="run silently: mutes mpv and disables RetroArch's audio driver for "
+        "just this run (real retroarch.cfg untouched). Only the DRM/picture "
+        "handoff is under test, so this doesn't compromise the result.",
+    )
     args = parser.parse_args()
 
     log("=== spike: mpv <-> RetroArch DRM handoff ===")
@@ -126,7 +164,9 @@ def main() -> None:
         log(f"--- round {round_num}/{args.rounds} ---")
 
         log("1. opening mpv, loading test media")
-        player = open_mpv(args.media, audio_device=args.audio_device, gpu_context=args.gpu_context)
+        player = open_mpv(
+            args.media, audio_device=args.audio_device, gpu_context=args.gpu_context, mute=args.mute
+        )
         input("   confirm: is picture showing on the TV? press Enter to continue... ")
 
         log("2. closing mpv")
@@ -136,14 +176,16 @@ def main() -> None:
             log(f"   sleeping {args.settle}s before launching RetroArch")
             time.sleep(args.settle)
 
-        log("3. launching RetroArch - quit it normally (its own menu/hotkey) when done poking at it")
-        rc = run_retroarch(args.core, args.rom)
+        log("3. launching RetroArch - quit it normally (F1 -> Quit RetroArch) when done poking at it")
+        rc = run_retroarch(args.core, args.rom, mute=args.mute)
         if rc != 0:
-            log(f"   ! non-zero exit ({rc}) - note whether picture/audio appeared at all before this")
+            log(f"   ! non-zero exit ({rc}) - note whether picture appeared at all before this")
 
         log("4. reopening mpv")
         try:
-            player2 = open_mpv(args.media, audio_device=args.audio_device, gpu_context=args.gpu_context)
+            player2 = open_mpv(
+                args.media, audio_device=args.audio_device, gpu_context=args.gpu_context, mute=args.mute
+            )
         except Exception as exc:  # noqa: BLE001
             log(f"   ! mpv reopen FAILED: {exc!r}")
             log("   that's the answer we needed - stop here and report this, including --settle used")
