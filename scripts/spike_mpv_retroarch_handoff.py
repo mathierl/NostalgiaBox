@@ -88,6 +88,9 @@ def open_mpv(media_path: str, *, audio_device: str | None, gpu_context: str, mut
 
 
 def close_mpv(player) -> None:
+    log("   calling mpv.terminate() - the last video frame may linger on screen for a")
+    log("   moment, that's expected (nothing repaints it until RetroArch draws its own")
+    log("   first frame) - do NOT Ctrl+C here, just wait a couple seconds")
     t0 = time.monotonic()
     try:
         player.terminate()
