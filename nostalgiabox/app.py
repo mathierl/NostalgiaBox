@@ -33,6 +33,7 @@ from .static_gen import (
     GLITCH_FILENAME,
     STATIC_FILENAME,
 )
+from .watch_state import STATE_FILENAME, STATE_SUBDIR, WatchState
 
 log = logging.getLogger(__name__)
 
@@ -84,12 +85,17 @@ class TVApp:
         assets_dir: Optional[Path] = None,
         player_factory: Optional[Callable[[], Player]] = None,
         game_launcher: Optional[Callable[[str, Path], int]] = None,
+        watch_state: Optional[WatchState] = None,
     ) -> None:
         self.config = config
         self.player = player
         self.input = input_manager
         self.overlay = overlay or OverlayManager(player, config, clock=clock)
         self._clock = clock
+        # Per-episode/per-game watch history (UKE-29) - None by default (as
+        # in most tests) means "don't track", so nothing touches disk unless
+        # a caller explicitly opts in; from_config wires up a real one.
+        self.watch_state = watch_state
         # Rebuilds a fresh Player after a game hands the display back (see
         # _launch_game) - only set for real hardware (from_config); with no
         # factory (dry-run / most tests) the same player instance is reused,
@@ -199,8 +205,16 @@ class TVApp:
                 )
             input_manager = InputManager(backends)
 
+        assets = assets_dir or config.assets_dir or DEFAULT_ASSETS_DIR
+        watch_state = WatchState(assets / STATE_SUBDIR / STATE_FILENAME)
+
         return cls(
-            config, player, input_manager, assets_dir=assets_dir, player_factory=player_factory
+            config,
+            player,
+            input_manager,
+            assets_dir=assets_dir,
+            player_factory=player_factory,
+            watch_state=watch_state,
         )
 
     # -- lifecycle ----------------------------------------------------------
@@ -643,6 +657,11 @@ class TVApp:
         try:
             self._game_launcher(core, rom_path)
         finally:
+            if self.watch_state is not None:
+                # Boolean played/play-count only (UKE-29) - RetroArch gives
+                # no duration or position signal, so "played" is the honest
+                # v1 semantic regardless of exit code.
+                self.watch_state.record_game_played(channel.number, channel.config.path, rom_path)
             if self._player_factory is not None:
                 self.player = self._player_factory()
                 self.player.on_end = self._ended.put
@@ -732,6 +751,8 @@ class TVApp:
                 break
             # Coalesce: only advance once even if several events queued up.
             if reason in (END_EOF, END_ERROR) and not advanced and not self.standby:
+                if reason == END_EOF:
+                    self._mark_current_watched()
                 self._advance_current()
                 advanced = True
 
@@ -744,11 +765,49 @@ class TVApp:
 
     # -- helpers ------------------------------------------------------------
     def _remember_position(self) -> None:
+        # Watch-state tracking (UKE-29) runs regardless of tune_in mode -
+        # unlike the "resume" feature below, watched/continue-watching state
+        # isn't something that should depend on how channel-surfing itself
+        # behaves.
+        self._record_watch_progress()
         if self.config.tune_in != "resume" or self._playing_path is None:
             return
         pos = self.player.get_time_pos()
         if pos is not None:
             self.lineup.current.remember(self._playing_path, pos)
+
+    def _record_watch_progress(self) -> None:
+        """Save how far into the current episode we are (UKE-29). Probing a
+        file's duration is a real subprocess call (ffprobe), so it's only
+        done once per episode - once known, it's cached in the watch-state
+        record itself and reused on every subsequent call, so this never
+        adds a hitch to a channel change the way probing on every call would.
+        """
+        if self.watch_state is None or self._playing_path is None:
+            return
+        pos = self.player.get_time_pos()
+        if pos is None:
+            return
+        channel = self.lineup.current
+        existing = self.watch_state.episode_state(channel.number, channel.config.path, self._playing_path)
+        duration = existing.duration
+        if not duration:
+            from .probe import probe_duration
+
+            duration = probe_duration(self._playing_path) or 0.0
+        self.watch_state.record_episode_position(
+            channel.number, channel.config.path, self._playing_path, pos, duration
+        )
+
+    def _mark_current_watched(self) -> None:
+        """Mark the currently-playing episode watched outright - called on a
+        natural end-of-file, which is unambiguous regardless of whatever
+        position was last sampled.
+        """
+        if self.watch_state is None or self._playing_path is None:
+            return
+        channel = self.lineup.current
+        self.watch_state.mark_episode_watched(channel.number, channel.config.path, self._playing_path)
 
     def _select_start_channel(self) -> None:
         if self.config.start_channel is not None and self.lineup.has_number(

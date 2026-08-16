@@ -5,10 +5,13 @@ from nostalgiabox.app import TVApp
 from nostalgiabox.config import config_from_dict
 from nostalgiabox.input.manager import InputManager
 from nostalgiabox.player import END_EOF, MockPlayer
+from nostalgiabox.watch_state import WatchState
 from tests.helpers import FakeClock, make_show
 
 
-def build_app(tmp_path, *, assets_dir=None, game_launcher=None, player_factory=None, **overrides):
+def build_app(
+    tmp_path, *, assets_dir=None, game_launcher=None, player_factory=None, watch_state=None, **overrides
+):
     for name in ("dragon", "arthur", "rugrats"):
         make_show(tmp_path, name, 4)
     data = {
@@ -34,6 +37,7 @@ def build_app(tmp_path, *, assets_dir=None, game_launcher=None, player_factory=N
         assets_dir=assets_dir,
         game_launcher=game_launcher,
         player_factory=player_factory,
+        watch_state=watch_state,
     )
     return app, player, clock
 
@@ -684,3 +688,142 @@ def test_show_episodes_still_exit_admin_browsing_normally(tmp_path):
     assert not app.admin_browsing
     assert app.admin_mode
     assert player.current is not None
+
+
+# -- watch state: continue-watching / watched / play tracking (UKE-29) ------
+# None by default (build_app doesn't pass one unless a test opts in), so the
+# many tests above never touch disk. These tests explicitly construct a
+# WatchState under tmp_path and pass it in to exercise the real hooks:
+# _record_watch_progress (channel change / standby), _mark_current_watched
+# (natural end-of-file), and the game-launch played/play_count tracking in
+# _launch_game.
+
+
+def test_no_watch_state_configured_is_a_no_op(tmp_path):
+    # Default build_app() passes watch_state=None - nothing should crash,
+    # and there's nothing to assert on since tracking is simply off.
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    player.time_pos = 42.0
+    send(app, Action.CHANNEL_UP)
+    assert app.watch_state is None
+
+
+def test_channel_change_records_watch_progress(tmp_path, monkeypatch):
+    import nostalgiabox.probe as probe_mod
+
+    monkeypatch.setattr(probe_mod, "probe_duration", lambda p: 1320.0)
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(tmp_path, watch_state=ws)
+    app.start()
+    playing = player.current
+    channel = app.lineup.current
+    player.time_pos = 300.0
+    send(app, Action.CHANNEL_UP)  # leaves channel 2, should record progress on `playing`
+
+    state = ws.episode_state(channel.number, channel.config.path, playing)
+    assert state.position == 300.0
+    assert state.duration == 1320.0
+    assert state.watched is False
+    assert state.in_progress is True
+
+
+def test_watch_progress_recorded_regardless_of_tune_in_mode(tmp_path, monkeypatch):
+    # _remember_position's own Channel.remember() call is gated on
+    # tune_in == "resume", but watch-state tracking must not be - the
+    # default tune_in ("random") must still track progress.
+    import nostalgiabox.probe as probe_mod
+
+    monkeypatch.setattr(probe_mod, "probe_duration", lambda p: 1320.0)
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(tmp_path, watch_state=ws, tune_in="random")
+    app.start()
+    playing = player.current
+    channel = app.lineup.current
+    player.time_pos = 100.0
+    send(app, Action.CHANNEL_UP)
+    assert ws.episode_state(channel.number, channel.config.path, playing).position == 100.0
+
+
+def test_standby_also_records_watch_progress(tmp_path, monkeypatch):
+    import nostalgiabox.probe as probe_mod
+
+    monkeypatch.setattr(probe_mod, "probe_duration", lambda p: 1320.0)
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(tmp_path, watch_state=ws)
+    app.start()
+    playing = player.current
+    channel = app.lineup.current
+    player.time_pos = 900.0
+    send(app, Action.POWER)  # enter standby
+    assert ws.episode_state(channel.number, channel.config.path, playing).position == 900.0
+
+
+def test_episode_reaching_natural_end_is_marked_watched(tmp_path):
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(tmp_path, watch_state=ws)
+    app.start()
+    playing = player.current
+    channel = app.lineup.current
+    player.finish_current(END_EOF)
+    app._drain_playback_events()
+    state = ws.episode_state(channel.number, channel.config.path, playing)
+    assert state.watched is True
+
+
+def test_episode_error_is_not_marked_watched(tmp_path):
+    from nostalgiabox.player import END_ERROR
+
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(tmp_path, watch_state=ws)
+    app.start()
+    playing = player.current
+    channel = app.lineup.current
+    player.finish_current(END_ERROR)
+    app._drain_playback_events()
+    state = ws.episode_state(channel.number, channel.config.path, playing)
+    assert state.watched is False
+
+
+def test_confirming_a_game_records_played_and_play_count(tmp_path):
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(
+        tmp_path, watch_state=ws, game_launcher=lambda c, r: 0, **_games_override(tmp_path)
+    )
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.CHANNEL_DOWN)
+    send(app, Action.VOLUME_UP)  # cursor -> SNES
+    send(app, Action.MUTE)  # into SNES's game list
+    send(app, Action.MUTE)  # confirm and launch the first game
+
+    system = app.games[0]
+    rom = system.episodes[0]
+    state = ws.game_state(system.number, system.config.path, rom)
+    assert state.played is True
+    assert state.play_count == 1
+
+    send(app, Action.MUTE)  # play it again
+    assert ws.game_state(system.number, system.config.path, rom).play_count == 2
+
+
+def test_watch_state_survives_across_app_restarts(tmp_path, monkeypatch):
+    # The whole point: unlike the pre-existing per-channel resume position,
+    # this needs to actually be on disk, not just in memory.
+    import nostalgiabox.probe as probe_mod
+
+    monkeypatch.setattr(probe_mod, "probe_duration", lambda p: 1320.0)
+    state_path = tmp_path / "watch_state.json"
+
+    ws1 = WatchState(state_path)
+    app1, player1, _ = build_app(tmp_path, watch_state=ws1)
+    app1.start()
+    playing = player1.current
+    channel_number = app1.lineup.current.number
+    channel_path = app1.lineup.current.config.path
+    player1.time_pos = 500.0
+    send(app1, Action.CHANNEL_UP)
+
+    ws2 = WatchState(state_path)  # simulates a fresh process starting up
+    state = ws2.episode_state(channel_number, channel_path, playing)
+    assert state.position == 500.0
