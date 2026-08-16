@@ -1,6 +1,14 @@
 import json
 
-from nostalgiabox.watch_state import IN_PROGRESS_FLOOR, WATCHED_THRESHOLD, WatchState
+from nostalgiabox.channel import build_lineup, build_game_channels
+from nostalgiabox.config import config_from_dict
+from nostalgiabox.watch_state import (
+    IN_PROGRESS_FLOOR,
+    WATCHED_THRESHOLD,
+    WatchState,
+    continue_watching,
+)
+from tests.helpers import make_show
 
 
 def test_unknown_episode_returns_defaults(tmp_path):
@@ -164,3 +172,85 @@ def test_all_episodes_and_all_games_return_snapshots(tmp_path):
     ws.record_game_played(5, rom_root, rom_root / "game.sfc")
     assert len(ws.all_episodes()) == 1
     assert len(ws.all_games()) == 1
+
+
+# -- continue_watching() (UKE-29) --------------------------------------------
+
+
+def _lineup_with_games(tmp_path, *, dragon_eps=3, arthur_eps=3, snes_roms=2):
+    make_show(tmp_path, "dragon", dragon_eps)
+    make_show(tmp_path, "arthur", arthur_eps)
+    make_show(tmp_path, "snes", snes_roms, ext=".sfc")
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [
+                {"number": 2, "name": "Dragon Tales", "path": str(tmp_path / "dragon")},
+                {"number": 3, "name": "Arthur", "path": str(tmp_path / "arthur")},
+            ],
+            "games": {
+                "systems": [
+                    {"name": "SNES", "path": str(tmp_path / "snes"), "core": "core.so", "extensions": [".sfc"]}
+                ]
+            },
+        }
+    )
+    lineup = build_lineup(config)
+    games = build_game_channels(config)
+    return lineup, games
+
+
+def test_continue_watching_returns_only_in_progress_episodes(tmp_path):
+    lineup, _ = _lineup_with_games(tmp_path)
+    ws = WatchState(tmp_path / "watch_state.json")
+    dragon = next(c for c in lineup if c.number == 2)
+    ws.record_episode_position(2, dragon.config.path, dragon.episodes[0], position=200.0, duration=1200.0)
+    ws.mark_episode_watched(2, dragon.config.path, dragon.episodes[1], duration=1200.0)  # fully watched, excluded
+
+    entries = continue_watching(list(lineup), ws)
+    assert len(entries) == 1
+    assert entries[0].channel_number == 2
+    assert entries[0].episode_path == dragon.episodes[0]
+    assert entries[0].minutes_left == round((1200.0 - 200.0) / 60)
+
+
+def test_continue_watching_excludes_games(tmp_path):
+    lineup, games = _lineup_with_games(tmp_path)
+    ws = WatchState(tmp_path / "watch_state.json")
+    snes = games[0]
+    ws.record_game_played(snes.number, snes.config.path, snes.episodes[0])
+    # games have no position, so even mixing them into the channel list must
+    # never produce a continue-watching entry for one.
+    entries = continue_watching(list(lineup) + games, ws)
+    assert entries == []
+
+
+def test_continue_watching_sorted_most_recent_first(tmp_path):
+    lineup, _ = _lineup_with_games(tmp_path)
+    ws = WatchState(tmp_path / "watch_state.json")
+    dragon = next(c for c in lineup if c.number == 2)
+    arthur = next(c for c in lineup if c.number == 3)
+    ws.record_episode_position(2, dragon.config.path, dragon.episodes[0], position=200.0, duration=1200.0)
+    ws.record_episode_position(3, arthur.config.path, arthur.episodes[0], position=200.0, duration=1200.0)
+
+    entries = continue_watching(list(lineup), ws)
+    assert [e.channel_number for e in entries] == [3, 2]  # arthur recorded last
+
+
+def test_continue_watching_respects_limit(tmp_path):
+    lineup, _ = _lineup_with_games(tmp_path, dragon_eps=3, arthur_eps=3)
+    ws = WatchState(tmp_path / "watch_state.json")
+    dragon = next(c for c in lineup if c.number == 2)
+    arthur = next(c for c in lineup if c.number == 3)
+    for ep in dragon.episodes:
+        ws.record_episode_position(2, dragon.config.path, ep, position=200.0, duration=1200.0)
+    for ep in arthur.episodes:
+        ws.record_episode_position(3, arthur.config.path, ep, position=200.0, duration=1200.0)
+
+    entries = continue_watching(list(lineup), ws, limit=2)
+    assert len(entries) == 2
+
+
+def test_continue_watching_with_no_watch_state_is_empty(tmp_path):
+    lineup, _ = _lineup_with_games(tmp_path)
+    assert continue_watching(list(lineup), None) == []

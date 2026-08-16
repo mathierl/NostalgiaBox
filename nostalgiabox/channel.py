@@ -52,6 +52,22 @@ def detect_season(text: str) -> Optional[int]:
     return None
 
 
+_EPISODE_BRACKET_ID = re.compile(r"\s*\[[^\[\]]*\]\s*$")
+
+
+def episode_title(path: Path) -> str:
+    """Best-effort human title from an episode filename: drop the extension
+    and a trailing '[...]' id tag some downloaders append, e.g. turns
+    'Bluey - 17. Butlere [MSUI27006725].mp4' into 'Bluey - 17. Butlere'.
+
+    Shared by the admin episode list (overlay.py) and the continue-watching
+    row (watch_state.py) so both describe the same episode the same way.
+    """
+    stem = path.stem if hasattr(path, "stem") else str(path)
+    cleaned = _EPISODE_BRACKET_ID.sub("", stem).strip()
+    return cleaned or stem
+
+
 def scan_episodes(
     root: Path,
     extensions: Sequence[str],

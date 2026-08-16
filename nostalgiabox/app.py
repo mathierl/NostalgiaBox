@@ -33,7 +33,7 @@ from .static_gen import (
     GLITCH_FILENAME,
     STATIC_FILENAME,
 )
-from .watch_state import STATE_FILENAME, STATE_SUBDIR, WatchState
+from .watch_state import STATE_FILENAME, STATE_SUBDIR, ContinueEntry, WatchState, continue_watching
 
 log = logging.getLogger(__name__)
 
@@ -133,6 +133,15 @@ class TVApp:
         self._browse_number: Optional[int] = None
         self._browse_episode_number: Optional[int] = None
         self._browse_episode_index: int = 0
+        # "Continue Watching" row (UKE-29): a text-only row of in-progress
+        # episodes shown above the channel/game grid. _continue_entries is
+        # (re)computed each time the grid is (re)entered, not on every
+        # keypress - see _refresh_continue_entries. _browse_continue_index
+        # is None whenever the cursor is on the grid itself (the common
+        # case, and the only state possible before this feature existed);
+        # it's only set while the cursor is actually on this row.
+        self._continue_entries: List[ContinueEntry] = []
+        self._browse_continue_index: Optional[int] = None
         # What was playing right before admin mode opened, so browsing
         # without picking anything new resumes exactly where it left off
         # (the show grid replaces the live picture with poster art - see
@@ -483,7 +492,10 @@ class TVApp:
             self._confirm_episode_selection()
             return
         if self.admin_browsing:
-            self._confirm_show_selection()
+            if self._browse_continue_index is not None:
+                self._confirm_continue_selection()
+            else:
+                self._confirm_show_selection()
             return
         if self.admin_mode:
             self._toggle_pause()
@@ -504,6 +516,8 @@ class TVApp:
             self._browse_number = self.lineup.current.number
             self._browse_episode_number = None
             self._browse_episode_index = 0
+            self._browse_continue_index = None
+            self._refresh_continue_entries()
             self._pre_admin_path = self._playing_path
             self._pre_admin_pos = self.player.get_time_pos() or 0.0
             self._show_admin_grid_background()
@@ -511,6 +525,7 @@ class TVApp:
         else:
             self.admin_browsing = False
             self.admin_episode_browsing = False
+            self._browse_continue_index = None
             if self.paused:
                 self._toggle_pause()
             self.overlay.clear_admin_panel()
@@ -530,9 +545,22 @@ class TVApp:
                 self.overlay.show_admin_episode_list(channel, highlight_index=self._browse_episode_index)
             return
         if self.admin_browsing:
-            self.overlay.show_admin_browser(self._admin_tiles(), highlight_number=self._browse_number)
+            self.overlay.show_admin_browser(
+                self._admin_tiles(),
+                highlight_number=self._browse_number,
+                continue_entries=self._continue_entries,
+                continue_index=self._browse_continue_index,
+            )
             return
         self.overlay.show_admin_panel(self.lineup, paused=self.paused)
+
+    def _refresh_continue_entries(self) -> None:
+        """Recompute the Continue Watching row's contents (see
+        watch_state.continue_watching) - cheap (in-memory dict lookups, see
+        that function's docstring), so this is called any time the browse
+        grid is (re)entered rather than kept incrementally up to date.
+        """
+        self._continue_entries = continue_watching(list(self.lineup), self.watch_state, limit=3)
 
     def _admin_tiles(self) -> List[Channel]:
         """Every tile the admin browse grid shows: real channels, then game
@@ -571,9 +599,31 @@ class TVApp:
             log.info("admin show-grid image not found (run `nostalgiabox --check`)")
 
     def _move_browse_cursor(self, *, drow: int = 0, dcol: int = 0) -> None:
+        """Move the browse cursor, which lives in one of two places: the
+        Continue Watching row (self._browse_continue_index set), or the
+        channel/game grid below it (self._browse_number). The row sits
+        above row 0 of the grid - Channel Up from the grid's top row moves
+        onto it (if it has anything in it), Channel Down from it moves back
+        onto the grid; there's no further wraparound past it, unlike the
+        grid's own row wraparound (see below) which is unaffected by any
+        of this when there's nothing to continue.
+        """
         from .thumbnails import GRID_COLS
 
         numbers = [c.number for c in self._admin_tiles()]
+        n_continue = len(self._continue_entries)
+
+        if self._browse_continue_index is not None:
+            if dcol:
+                self._browse_continue_index = (self._browse_continue_index + dcol) % n_continue
+            elif drow > 0:
+                self._browse_continue_index = None
+                if numbers:
+                    self._browse_number = numbers[0]
+            # drow < 0: already the topmost row - nothing to do.
+            self._refresh_admin_panel()
+            return
+
         if not numbers:
             return
         cols = GRID_COLS if len(numbers) > 1 else 1
@@ -586,7 +636,11 @@ class TVApp:
             row_len = min(cols, len(numbers) - row_start)
             col = (idx - row_start + dcol) % row_len
             idx = row_start + col
-        if drow:
+        elif drow:
+            if drow < 0 and row == 0 and n_continue:
+                self._browse_continue_index = min(col, n_continue - 1)
+                self._refresh_admin_panel()
+                return
             row = (row + drow) % rows
             row_start = row * cols
             row_len = min(cols, len(numbers) - row_start)
@@ -605,9 +659,28 @@ class TVApp:
             self._browse_episode_index = 0
         self._refresh_admin_panel()
 
+    def _confirm_continue_selection(self) -> None:
+        """Resume the highlighted Continue Watching entry exactly where it
+        was left off - unlike picking a channel (which drills into its
+        episode list), this plays immediately, the way clicking a Netflix
+        continue-watching tile does.
+        """
+        index = self._browse_continue_index
+        if index is None or not (0 <= index < len(self._continue_entries)):
+            return
+        entry = self._continue_entries[index]
+        self.admin_browsing = False
+        self._browse_continue_index = None
+        self._play_specific_episode(entry.channel_number, entry.episode_path, start=entry.resume_position)
+        self._pre_admin_path = None  # something new is playing; nothing to resume
+        self._browse_number = self.lineup.current.number
+        self._refresh_admin_panel()
+
     def _admin_back_to_shows(self) -> None:
         self.admin_episode_browsing = False
         self.admin_browsing = True
+        self._browse_continue_index = None
+        self._refresh_continue_entries()
         self._refresh_admin_panel()
 
     def _move_episode_cursor(self, delta: int) -> None:
@@ -672,10 +745,11 @@ class TVApp:
             # grid overlay has its usual backdrop again.
             self._show_admin_grid_background()
 
-    def _play_specific_episode(self, channel_number: int, episode_path: Path) -> None:
-        """Play exactly this episode (picked from the admin episode list),
-        bypassing the channel's normal tune-in behaviour (random/resume/
-        broadcast) for this one play-through.
+    def _play_specific_episode(self, channel_number: int, episode_path: Path, *, start: float = 0.0) -> None:
+        """Play exactly this episode (picked from the admin episode list, or
+        resumed from the Continue Watching row via ``start``), bypassing the
+        channel's normal tune-in behaviour (random/resume/broadcast) for
+        this one play-through.
         """
         if not self.lineup.has_number(channel_number):
             return
@@ -687,7 +761,7 @@ class TVApp:
         self._pending_banner = None
         self._switch_deadline = None
         self.overlay.show_channel_bug(channel.number, channel.name)
-        self._play_request(PlayRequest(path=episode_path, start=0.0))
+        self._play_request(PlayRequest(path=episode_path, start=start))
 
     def _toggle_pause(self) -> None:
         self.paused = not self.paused
@@ -714,6 +788,8 @@ class TVApp:
             self._browse_number = None
             self._browse_episode_number = None
             self._browse_episode_index = 0
+            self._browse_continue_index = None
+            self._continue_entries = []
             self._pre_admin_path = None
             self.paused = False
             self.player.stop()

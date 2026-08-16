@@ -16,14 +16,14 @@ scales it to the TV) and cleared automatically after a few seconds by
 
 from __future__ import annotations
 
-import re
 import time
-from typing import Callable, Dict, Optional, Sequence
+from typing import Callable, Dict, List, Optional, Sequence
 
-from .channel import Channel, ChannelLineup
+from .channel import Channel, ChannelLineup, episode_title
 from .config import Config, UiConfig
 from .player import Player
 from .thumbnails import admin_grid_tile_rect
+from .watch_state import ContinueEntry
 
 # Virtual canvas the overlays are laid out on. This maps to the WHOLE display
 # (a 16:9 TV), so mpv scales it to whatever the screen is.
@@ -106,7 +106,12 @@ class OverlayManager:
         self._expiry.pop(_ID_ADMIN, None)  # persistent until cleared
 
     def show_admin_browser(
-        self, tiles: Sequence["Channel"], *, highlight_number: Optional[int]
+        self,
+        tiles: Sequence["Channel"],
+        *,
+        highlight_number: Optional[int],
+        continue_entries: Sequence["ContinueEntry"] = (),
+        continue_index: Optional[int] = None,
     ) -> None:
         """Highlight ring, title/subtitle labels and header/footer text drawn
         on top of the real poster-grid background image (see
@@ -114,8 +119,17 @@ class OverlayManager:
         which swaps the player onto that image before calling this).
         ``tiles`` is real channels and game systems combined (see
         :meth:`nostalgiabox.app.TVApp._admin_tiles`), in display order.
+
+        ``continue_entries`` (see :mod:`nostalgiabox.watch_state`) is drawn
+        as a text-only row above the header, e.g. "Arthur - Sick as a Dog
+        (12 min left)" - no poster art, since unlike the channel/game grid
+        it can't be pre-baked into the background image (it changes with
+        live watch state, not just at ``--check`` time). ``continue_index``
+        highlights one of them; when it's not ``None`` the channel/game grid
+        below isn't highlighted at all (the cursor is on the row, not the
+        grid) - see :meth:`nostalgiabox.app.TVApp._move_browse_cursor`.
         """
-        ass = _admin_browser_ass(tiles, highlight_number)
+        ass = _admin_browser_ass(tiles, highlight_number, continue_entries, continue_index)
         self._player.set_overlay(_ID_ADMIN, ass, CANVAS_W, CANVAS_H)
         self._expiry.pop(_ID_ADMIN, None)  # persistent until cleared
 
@@ -296,22 +310,81 @@ def _admin_panel_ass(lineup: "ChannelLineup", paused: bool, ui: UiConfig) -> str
     return "\n".join(parts)
 
 
-def _admin_browser_ass(tiles: "Sequence[Channel]", highlight_number: Optional[int]) -> str:
+# "Continue Watching" text row (UKE-29): drawn in canvas-space safe-area
+# coordinates (like the header/footer, not the tile grid's local image
+# space) since - unlike the poster grid - it's never baked into the
+# background image; see thumbnails.GRID_HEADER_H for why the header
+# reserves room for it regardless of whether any entries exist on a given
+# run. Text-only, no poster art (the chosen "minimalist" visual treatment -
+# also sidesteps needing live per-episode poster generation for state that
+# changes on every watch, not just at ``--check`` time).
+_CONTINUE_LIMIT = 3
+_CONTINUE_LABEL_Y = _IY0 + 44
+_CONTINUE_ROW_Y = _IY0 + 68
+_CONTINUE_CHIP_H = 58
+_CONTINUE_GAP = 24
+_CONTINUE_CHIP_W = ((_IX1 - _IX0) - _CONTINUE_GAP * (_CONTINUE_LIMIT - 1)) // _CONTINUE_LIMIT
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "\u2026"
+
+
+def _admin_browser_ass(
+    tiles: "Sequence[Channel]",
+    highlight_number: Optional[int],
+    continue_entries: "Sequence[ContinueEntry]" = (),
+    continue_index: Optional[int] = None,
+) -> str:
     """Header, per-tile title/count labels (positioned to sit right under
     each poster - see :func:`nostalgiabox.thumbnails.admin_grid_tile_rect`
     - a highlight ring around the selected one, and a footer hint. The
     posters themselves are the background image this draws on top of, not
     drawn here. ``tiles`` is real channels and game systems combined.
+
+    ``continue_entries`` draws the "Continue Watching" row above the header
+    (see the constants just above); when ``continue_index`` is set, that's
+    where the cursor is, and no grid tile is highlighted at all.
     """
     channels = list(tiles)
     header = "Select a channel"
     footer = "\u2190\u2191\u2193\u2192 move      mute select      hold power exit"
+    parts: List[str] = []
 
-    parts = [rf"{{\an7\pos({_IX0},{_IY0}){_admin_style(size=34)}}}{_escape(header)}"]
+    if continue_entries:
+        parts.append(
+            rf"{{\an7\pos({_IX0},{_CONTINUE_LABEL_Y}){_admin_style(size=18, color=_ADMIN_MUTED, bold=False)}}}"
+            "Continue Watching"
+        )
+        for i, entry in enumerate(continue_entries[:_CONTINUE_LIMIT]):
+            x = _IX0 + i * (_CONTINUE_CHIP_W + _CONTINUE_GAP)
+            selected = i == continue_index
+            if selected:
+                parts.append(
+                    _outline_rect(
+                        x=x - 8,
+                        y=_CONTINUE_ROW_Y - 8,
+                        w=_CONTINUE_CHIP_W + 16,
+                        h=_CONTINUE_CHIP_H + 16,
+                        color=_ADMIN_WHITE,
+                        thickness=3,
+                    )
+                )
+            title_color = _ADMIN_WHITE if selected else _ADMIN_DIM
+            title = _truncate(f"{entry.channel_name} - {entry.title}", 30)
+            subtitle = f"{entry.minutes_left} min left"
+            parts.append(rf"{{\an7\pos({x},{_CONTINUE_ROW_Y}){_admin_style(size=20, color=title_color)}}}{_escape(title)}")
+            parts.append(
+                rf"{{\an7\pos({x},{_CONTINUE_ROW_Y + 28}){_admin_style(size=16, color=_ADMIN_MUTED, bold=False)}}}{_escape(subtitle)}"
+            )
+
+    parts.append(rf"{{\an7\pos({_IX0},{_IY0}){_admin_style(size=34)}}}{_escape(header)}")
     for i, channel in enumerate(channels):
         lx, ly, w, h = admin_grid_tile_rect(i, len(channels))
         x, y = _FRAME_X0 + lx, ly
-        selected = channel.number == highlight_number
+        selected = continue_index is None and channel.number == highlight_number
         if selected:
             parts.append(_outline_rect(x=x - 4, y=y - 4, w=w + 8, h=h + 8, color=_ADMIN_WHITE, thickness=3))
         count = len(channel.episodes)
@@ -380,7 +453,7 @@ def _admin_episode_list_ass(channel: "Channel", highlight_index: Optional[int]) 
         selected = i == highlight_index
         y = _EPISODE_LIST_TOP + row * _EPISODE_ROW_H
         color = _ADMIN_WHITE if selected else _ADMIN_DIM
-        label = f"{i + 1}.  {_episode_title(path)}"
+        label = f"{i + 1}.  {episode_title(path)}"
         parts.append(rf"{{\an7\pos({_IX0},{y}){_admin_style(size=24, color=color, bold=selected)}}}{_escape(label)}")
 
     if offset > 0:
@@ -395,18 +468,6 @@ def _admin_episode_list_ass(channel: "Channel", highlight_index: Optional[int]) 
     parts.append(rf"{{\an2\pos({_FRAME_CX},{_IY1}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}{_escape(footer)}")
     return "\n".join(parts)
 
-
-_EPISODE_BRACKET_ID = re.compile(r"\s*\[[^\[\]]*\]\s*$")
-
-
-def _episode_title(path) -> str:
-    """Best-effort human title from an episode filename: drop the extension
-    and a trailing '[...]' id tag some downloaders append, e.g. turns
-    'Bluey - 17. Butlere [MSUI27006725].mp4' into 'Bluey - 17. Butlere'.
-    """
-    stem = path.stem if hasattr(path, "stem") else str(path)
-    cleaned = _EPISODE_BRACKET_ID.sub("", stem).strip()
-    return cleaned or stem
 
 
 def _filled_rect(*, x: float, y: float, w: float, h: float, fill: str) -> str:

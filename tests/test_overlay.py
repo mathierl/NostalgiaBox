@@ -216,6 +216,59 @@ def test_admin_browser_highlights_selected_channel(tmp_path):
     assert ass.count("\\3c") == 1
 
 
+def test_admin_browser_draws_continue_watching_row(tmp_path):
+    from nostalgiabox.channel import build_lineup
+    from nostalgiabox.watch_state import ContinueEntry
+
+    make_show(tmp_path, "b", 3)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 4, "name": "Bugs", "path": str(tmp_path / "b")}],
+        }
+    )
+    lineup = build_lineup(config)
+    entry = ContinueEntry(
+        channel_number=4,
+        channel_name="Bugs",
+        episode_path=tmp_path / "b" / "b_ep01.mp4",
+        title="Bugs Ep 1",
+        resume_position=200.0,
+        minutes_left=12,
+        last_played=1000.0,
+    )
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_browser(lineup, highlight_number=4, continue_entries=[entry], continue_index=0)
+    ass = player.overlays[5]
+    assert "Continue Watching" in ass
+    assert "Bugs - Bugs Ep 1" in ass
+    assert "12 min left" in ass
+    # the continue-row entry is selected, so the grid tile itself must not
+    # also show as highlighted - only one outline ring total.
+    assert ass.count("\\3c") == 1
+
+
+def test_admin_browser_without_continue_entries_omits_the_row(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "b", 3)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 4, "name": "Bugs", "path": str(tmp_path / "b")}],
+        }
+    )
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_browser(lineup, highlight_number=4)
+    ass = player.overlays[5]
+    assert "Continue Watching" not in ass
+    # grid tile highlighting is unaffected by the (absent) continue row.
+    assert ass.count("\\3c") == 1
+
+
 def test_admin_browser_and_panel_share_overlay_slot(tmp_path):
     from nostalgiabox.channel import build_lineup
 

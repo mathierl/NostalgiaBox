@@ -27,7 +27,9 @@ import tempfile
 import time
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Sequence
+
+from .channel import Channel, episode_title
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +74,59 @@ class GameState:
 def _from_dict(cls, data: dict):
     known = {f.name for f in fields(cls)}
     return cls(**{k: v for k, v in data.items() if k in known})
+
+
+@dataclass(frozen=True)
+class ContinueEntry:
+    """One row of the admin "Continue Watching" list (UKE-29): a specific
+    in-progress episode, ready to resume exactly where it was left off.
+    """
+
+    channel_number: int
+    channel_name: str
+    episode_path: Path
+    title: str
+    resume_position: float
+    minutes_left: int
+    last_played: float
+
+
+def continue_watching(
+    channels: Sequence[Channel], watch_state: Optional["WatchState"], *, limit: int = 10
+) -> List[ContinueEntry]:
+    """The most recently in-progress episodes across every real (non-game)
+    channel, most recent first. Games are deliberately excluded - they have
+    no resume position to continue from (see the module docstring).
+
+    Cheap to call: everything here is dict lookups against the already-
+    loaded in-memory watch state, no disk or subprocess work, so callers can
+    recompute this freely (e.g. every time the admin browse grid is opened)
+    rather than trying to keep it incrementally in sync.
+    """
+    if watch_state is None:
+        return []
+    entries: List[ContinueEntry] = []
+    for channel in channels:
+        if channel.config.kind == "game":
+            continue
+        for episode_path in channel.episodes:
+            state = watch_state.episode_state(channel.number, channel.config.path, episode_path)
+            if not state.in_progress:
+                continue
+            remaining = max(1, round((state.duration - state.position) / 60))
+            entries.append(
+                ContinueEntry(
+                    channel_number=channel.number,
+                    channel_name=channel.name,
+                    episode_path=episode_path,
+                    title=episode_title(episode_path),
+                    resume_position=state.position,
+                    minutes_left=remaining,
+                    last_played=state.last_played,
+                )
+            )
+    entries.sort(key=lambda e: e.last_played, reverse=True)
+    return entries[:limit]
 
 
 class WatchState:
@@ -197,6 +252,8 @@ __all__ = [
     "WatchState",
     "EpisodeState",
     "GameState",
+    "ContinueEntry",
+    "continue_watching",
     "STATE_SUBDIR",
     "STATE_FILENAME",
     "WATCHED_THRESHOLD",

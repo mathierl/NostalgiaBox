@@ -827,3 +827,98 @@ def test_watch_state_survives_across_app_restarts(tmp_path, monkeypatch):
     ws2 = WatchState(state_path)  # simulates a fresh process starting up
     state = ws2.episode_state(channel_number, channel_path, playing)
     assert state.position == 500.0
+
+
+# -- Continue Watching row (UKE-29) ------------------------------------------
+# A text-only row above the channel/game grid, showing in-progress episodes
+# so they can be resumed directly rather than dug back out of a channel's
+# episode list. Cursor lives at self._browse_continue_index while focused
+# there (None the rest of the time, which is most of the time - see
+# TVApp._move_browse_cursor). These tests use the default 3-channel,
+# 2-column build_app() layout: row 0 = [Dragon Tales(2), Arthur(3)],
+# row 1 = [Rugrats(4)].
+
+
+def _seed_in_progress(app, ws, channel_number, *, index=0, position=200.0, duration=1200.0):
+    channel = next(c for c in app.lineup if c.number == channel_number)
+    episode = channel.episodes[index]
+    ws.record_episode_position(channel_number, channel.config.path, episode, position=position, duration=duration)
+    return episode
+
+
+def test_no_continue_row_when_nothing_in_progress(tmp_path):
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(tmp_path, watch_state=ws)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    assert app._continue_entries == []
+    send(app, Action.CHANNEL_UP)  # no continue row - old row-wrap behaviour applies
+    assert app._browse_continue_index is None
+    assert app._browse_number == 4  # wraps to the last row, same as before this feature
+
+
+def test_channel_up_from_grid_top_row_enters_continue_row(tmp_path):
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(tmp_path, watch_state=ws)
+    app.start()
+    _seed_in_progress(app, ws, 2)
+    send(app, Action.ADMIN_TOGGLE)
+    assert app._browse_continue_index is None  # opening still lands on the grid
+    assert len(app._continue_entries) == 1
+
+    send(app, Action.CHANNEL_UP)  # row 0 -> continue row
+    assert app._browse_continue_index == 0
+
+    send(app, Action.CHANNEL_DOWN)  # continue row -> back onto the grid
+    assert app._browse_continue_index is None
+    assert app._browse_number == 2
+
+
+def test_volume_moves_within_continue_row_not_the_grid(tmp_path):
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(tmp_path, watch_state=ws)
+    app.start()
+    _seed_in_progress(app, ws, 2, position=200.0)
+    _seed_in_progress(app, ws, 3, position=300.0)  # recorded later -> sorts first
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.CHANNEL_UP)
+    assert app._browse_continue_index == 0
+    before = app._browse_number
+
+    send(app, Action.VOLUME_UP)
+    assert app._browse_continue_index == 1
+    assert app._browse_number == before  # grid cursor untouched while on the row
+
+    send(app, Action.VOLUME_UP)
+    assert app._browse_continue_index == 0  # wraps within the row
+
+
+def test_confirming_continue_entry_resumes_at_saved_position(tmp_path):
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(tmp_path, watch_state=ws)
+    app.start()
+    episode = _seed_in_progress(app, ws, 3, position=250.0, duration=1200.0)
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.CHANNEL_UP)  # onto the continue row
+    assert app._browse_continue_index == 0
+
+    send(app, Action.MUTE)  # confirm - resumes immediately, no episode list
+
+    assert not app.admin_browsing
+    assert app._browse_continue_index is None
+    assert app.lineup.current.number == 3
+    assert player.current == episode
+    assert player.played[-1] == (episode, 250.0)
+
+
+def test_continue_entries_recomputed_on_reopening_admin_mode(tmp_path):
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(tmp_path, watch_state=ws)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    assert app._continue_entries == []
+    send(app, Action.ADMIN_TOGGLE)  # close
+
+    _seed_in_progress(app, ws, 2)
+    send(app, Action.ADMIN_TOGGLE)  # reopen - should pick up the new state
+    assert len(app._continue_entries) == 1

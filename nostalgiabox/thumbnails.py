@@ -48,7 +48,14 @@ _GRID_H = 720
 # positions overlay.py draws on top, via admin_grid_tile_rect() below.
 GRID_COLS = 2
 _GRID_MARGIN_X = 56
-_GRID_HEADER_H = 96
+# Reserves room for the "Select a channel" header line *and*, below it, the
+# "Continue Watching" text row overlay.py draws (see CONTINUE_LIMIT there).
+# This is baked into the pre-generated background image (see module
+# docstring), so the space is always reserved even on a run with nothing
+# in progress - there's no way to know that at --check time, only at browse
+# time. A public constant (not a leading underscore) since overlay.py needs
+# it to position the continue-watching text at the same header height.
+GRID_HEADER_H = 188
 _GRID_FOOTER_H = 56
 _GRID_GAP = 28
 _GRID_LABEL_H = 60
@@ -84,10 +91,10 @@ def admin_grid_tile_rect(index: int, count: int) -> tuple[int, int, int, int]:
     rows = max(1, -(-count // cols))  # ceil division
     col_w = (_GRID_W - _GRID_MARGIN_X * 2 - _GRID_GAP * (cols - 1)) // cols
     tile_h = int(col_w / _POSTER_ASPECT)
-    available_h = _GRID_H - _GRID_HEADER_H - _GRID_FOOTER_H
+    available_h = _GRID_H - GRID_HEADER_H - _GRID_FOOTER_H
     row_pitch = tile_h + _GRID_LABEL_H + _GRID_GAP
     block_h = rows * row_pitch - _GRID_GAP
-    start_y = _GRID_HEADER_H + max(0, (available_h - block_h) // 2)
+    start_y = GRID_HEADER_H + max(0, (available_h - block_h) // 2)
 
     row, col = divmod(index, cols)
     x = _GRID_MARGIN_X + col * (col_w + _GRID_GAP)
@@ -233,6 +240,7 @@ __all__ = [
     "THUMBS_SUBDIR",
     "GRID_FILENAME",
     "GRID_COLS",
+    "GRID_HEADER_H",
     "ffmpeg_available",
     "pillow_available",
     "admin_grid_tile_rect",
