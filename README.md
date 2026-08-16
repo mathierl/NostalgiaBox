@@ -413,11 +413,13 @@ nostalgiabox/
 ├── playlist.py    the shuffle bag (each episode once, then reshuffle)
 ├── channel.py     folder scanning, tune-in modes, channel navigation
 ├── player.py      mpv player (+ a mock for tests)
-├── overlay.py     the green on-screen display + the admin-mode UI
+├── overlay.py     the green on-screen display (channel bug, volume, admin panel)
 ├── crt.py         the CRT shader
 ├── input/         remote input (Flirc/keyboard, HDMI-CEC, keymap)
 ├── static_gen.py  ffmpeg-generated static/glitch/colour-bar clips
-├── thumbnails.py  ffmpeg + Pillow poster art for the admin-mode grid
+├── thumbnails.py  ffmpeg poster art for the admin-mode UI
+├── admin_server.py  local HTTP server behind the admin-mode UI
+├── admin_ui/      the admin-mode browser UI (HTML/CSS/JS, kiosk Chromium)
 └── app.py         the TV state machine
 ```
 

@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>NostalgiaBox admin</title>
+<style>
+  /* Real, state-driven admin UI (UKE-29) - adapted from the design mockup
+     but with all its own local interactivity (keydown handlers, click
+     handlers, hardcoded fake data) stripped out. This page has no logic of
+     its own: it polls GET /state a few times a second and redraws the DOM
+     from whatever JSON comes back. Every button press is still handled by
+     nostalgiabox's normal InputManager/TVApp in the Python process - see
+     admin_server.py's module docstring for why. */
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #0b0b0c;
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+    color: #fff;
+    overflow: hidden;
+  }
+  #screen { width: 100vw; height: 100vh; background: #141414; position: relative; overflow: hidden; }
+  .header { display: flex; align-items: center; justify-content: space-between; padding: 28px 64px 0 64px; }
+  .wordmark { font-size: 24px; letter-spacing: 2px; font-weight: 700; color: #e6b325; }
+  .header-right { font-size: 14px; color: #8a8a8a; letter-spacing: 0.5px; }
+
+  .rows { padding: 20px 0 0 0; }
+  .row { padding: 0 64px; margin-bottom: 32px; }
+  .row-title { font-size: 18px; font-weight: 600; margin: 0 0 12px 2px; color: #f2f2f2; }
+  .row-title .count { font-size: 13px; font-weight: 400; color: #7a7a7a; margin-left: 10px; }
+
+  .cards { display: flex; gap: 16px; flex-wrap: wrap; }
+  .card {
+    position: relative;
+    width: 220px; height: 124px;
+    border-radius: 6px;
+    background: #1e1e1e;
+    background-size: cover; background-position: center;
+    flex-shrink: 0;
+    transform: scale(1);
+    transition: transform 100ms ease, box-shadow 100ms ease;
+    display: flex; align-items: flex-end;
+    overflow: hidden;
+  }
+  .card.game {
+    background-image: repeating-linear-gradient(135deg, #2c2c2c, #2c2c2c 12px, #232323 12px, #232323 24px);
+  }
+  .card.focused { transform: scale(1.12); z-index: 5; box-shadow: 0 0 0 3px #ffffff, 0 12px 28px rgba(0,0,0,0.6); }
+  .card-scrim { width: 100%; padding: 9px 12px 8px; background: linear-gradient(0deg, rgba(0,0,0,0.88), transparent 90%); }
+  .card-title { font-size: 15px; font-weight: 600; line-height: 1.25; }
+  .card-sub { font-size: 12px; color: #c9c9c9; margin-top: 3px; }
+  .card-check {
+    position: absolute; top: 8px; left: 8px;
+    width: 20px; height: 20px; border-radius: 50%;
+    background: #2fa84f; display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700;
+  }
+
+  .continue-card { width: 320px; height: auto; padding: 14px 16px; align-items: stretch; flex-direction: column; background: #1c1c1e; }
+  .continue-card .card-title { font-size: 15px; }
+  .continue-card .card-sub { color: #e6b325; margin-top: 4px; }
+
+  .footer { position: absolute; left: 0; right: 0; bottom: 22px; text-align: center; font-size: 14px; color: #6f6f6f; letter-spacing: 0.3px; }
+
+  #detail { position: absolute; inset: 0; background: #141414; padding: 40px 64px; display: none; }
+  #detail.open { display: block; }
+  .back-hint { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: #8a8a8a; margin-bottom: 20px; }
+  .detail-header { font-size: 26px; font-weight: 700; margin: 0 0 4px 0; }
+  .detail-sub { font-size: 14px; color: #8a8a8a; margin: 0 0 20px 0; }
+  .season-header { font-size: 13px; font-weight: 700; letter-spacing: 0.6px; color: #8a8a8a; text-transform: uppercase; padding: 16px 16px 8px; }
+  .list { display: flex; flex-direction: column; max-height: 460px; overflow-y: auto; }
+  .list-item { display: flex; align-items: center; gap: 14px; padding: 10px 16px; border-radius: 5px; color: #a8a8a8; font-size: 15px; }
+  .list-item .n { width: 24px; color: #6f6f6f; font-size: 13px; text-align: right; flex-shrink: 0; }
+  .list-item .label-wrap { flex: 1; min-width: 0; }
+  .list-item .sub { font-size: 12px; color: #6f6f6f; margin-top: 3px; }
+  .list-item .sub.amber { color: #e6b325; }
+  .list-item .status { width: 22px; flex-shrink: 0; display: flex; justify-content: center; }
+  .check { width: 17px; height: 17px; border-radius: 50%; background: #2fa84f; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #0c2c14; }
+  .list-item.focused { background: #fff; color: #111; }
+  .list-item.focused .n, .list-item.focused .sub { color: #666; }
+  .list-item.focused .sub.amber { color: #a37714; }
+
+  .empty { color: #6a6a6a; font-size: 15px; padding: 40px 64px; }
+</style>
+</head>
+<body>
+<div id="screen">
+  <div class="header">
+    <div class="wordmark">NOSTALGIABOX</div>
+    <div class="header-right">Admin mode</div>
+  </div>
+  <div class="rows" id="grid"></div>
+  <div class="footer" id="gridFooter">&larr; &uarr; &darr; &rarr; move &nbsp;&nbsp;&nbsp; mute select &nbsp;&nbsp;&nbsp; hold power exit</div>
+
+  <div id="detail">
+    <div class="back-hint">&lsaquo; power to go back</div>
+    <div class="detail-header" id="detailTitle"></div>
+    <div class="detail-sub" id="detailSub"></div>
+    <div class="list" id="detailList"></div>
+    <div class="footer">&uarr; &darr; move &nbsp;&nbsp;&nbsp; mute select &nbsp;&nbsp;&nbsp; power back</div>
+  </div>
+</div>
+
+<script>
+var POLL_MS = 120;
+var grid = document.getElementById("grid");
+var detail = document.getElementById("detail");
+
+function el(tag, className, text) {
+  var e = document.createElement("div");
+  if (className) e.className = className;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function renderGrid(state) {
+  detail.classList.remove("open");
+  grid.innerHTML = "";
+
+  var continueItems = state.continue || [];
+  if (continueItems.length) {
+    var row = el("div", "row");
+    row.appendChild(el("div", "row-title", "Continue Watching"));
+    var cards = el("div", "cards");
+    continueItems.forEach(function(entry) {
+      var card = el("div", "card continue-card" + (entry.selected ? " focused" : ""));
+      var title = el("div", "card-title", entry.channel_name + " - " + entry.title);
+      var sub = el("div", "card-sub", entry.minutes_left + " min left");
+      card.appendChild(title);
+      card.appendChild(sub);
+      cards.appendChild(card);
+    });
+    row.appendChild(cards);
+    grid.appendChild(row);
+  }
+
+  (state.sections || []).forEach(function(section) {
+    var row = el("div", "row");
+    var titleEl = el("div", "row-title", section.title);
+    var count = el("span", "count", section.tiles.length + (section.tiles.length === 1 ? " tile" : " tiles"));
+    titleEl.appendChild(count);
+    row.appendChild(titleEl);
+
+    var cards = el("div", "cards");
+    section.tiles.forEach(function(tile) {
+      var card = el("div", "card" + (tile.kind === "game" ? " game" : "") + (tile.selected ? " focused" : ""));
+      if (tile.poster_url) {
+        card.style.backgroundImage = "url(" + tile.poster_url + ")";
+      }
+      if (tile.all_watched) card.appendChild(el("div", "card-check", "✓"));
+      var scrim = el("div", "card-scrim");
+      scrim.appendChild(el("div", "card-title", "CH " + String(tile.number).padStart(2, "0") + "  " + tile.name));
+      var subText = tile.count_label;
+      if (tile.watched_count !== null && tile.watched_count !== undefined && tile.count > 0) {
+        subText = tile.watched_count + " of " + tile.count + (tile.kind === "game" ? " played" : " watched");
+      }
+      scrim.appendChild(el("div", "card-sub", subText));
+      card.appendChild(scrim);
+      cards.appendChild(card);
+    });
+    row.appendChild(cards);
+    grid.appendChild(row);
+  });
+
+  if (!continueItems.length && !(state.sections || []).length) {
+    grid.appendChild(el("div", "empty", "Nothing configured yet."));
+  }
+}
+
+function renderEpisodeList(data) {
+  detail.classList.add("open");
+  document.getElementById("detailTitle").textContent = data.channel_name || "";
+  var verb = data.kind === "game" ? "Select a game" : "Select an episode";
+  var sub = data.total <= 1 ? verb : verb + "  •  " + (data.highlight_index + 1) + " of " + data.total;
+  document.getElementById("detailSub").textContent = sub;
+
+  var listEl = document.getElementById("detailList");
+  listEl.innerHTML = "";
+  var lastSeason;
+  (data.episodes || []).forEach(function(ep) {
+    if (ep.season !== null && ep.season !== undefined && ep.season !== lastSeason) {
+      listEl.appendChild(el("div", "season-header", "Season " + ep.season));
+      lastSeason = ep.season;
+    }
+    var item = el("div", "list-item" + (ep.selected ? " focused" : ""));
+    item.appendChild(el("div", "n", (ep.index + 1) + "."));
+    var wrap = el("div", "label-wrap");
+    wrap.appendChild(el("div", null, ep.title));
+    if (ep.in_progress) wrap.appendChild(el("div", "sub amber", "In progress"));
+    item.appendChild(wrap);
+    var status = el("div", "status");
+    if (ep.watched) status.appendChild(el("div", "check", "✓"));
+    item.appendChild(status);
+    listEl.appendChild(item);
+  });
+
+  var focused = listEl.querySelector(".list-item.focused");
+  if (focused) focused.scrollIntoView({ block: "nearest" });
+}
+
+function render(state) {
+  if (state.mode === "episode_list") {
+    renderEpisodeList(state.episode_list || {});
+  } else {
+    renderGrid(state);
+  }
+}
+
+function poll() {
+  fetch("/state", { cache: "no-store" })
+    .then(function(r) { return r.json(); })
+    .then(render)
+    .catch(function() { /* transient - next poll will retry */ });
+}
+
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>

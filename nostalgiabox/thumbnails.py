@@ -1,17 +1,12 @@
-"""Poster thumbnails for the admin/developer view's show grid.
+"""Poster thumbnails for the browser-based admin UI.
 
-Unlike the retro CRT overlays (pure ASS text/vector drawing), the modern
-admin-mode show grid uses real poster art - a frame grabbed from each
-channel's first episode via ffmpeg. Since mpv's ``osd-overlay`` (ass-events)
-mechanism can only draw text and vector shapes, not raster images, real
-posters can't be layered on top of the live video the way the channel banner
-or volume bar are. Instead, the whole grid (dark background + every poster,
-positioned to line up with where :mod:`nostalgiabox.overlay` draws the
-highlight ring and labels) is composed once into a single image with Pillow,
-and displayed by swapping the player onto it (:meth:`Player.play_loop`,
-the same mechanism already used for the static/colour-bars filler clips) -
-see :class:`nostalgiabox.app.TVApp` for how playback is remembered and
-resumed around this.
+A poster is one representative frame grabbed from each channel's first
+episode via ffmpeg. These used to be composed into a single pre-baked
+background image for mpv's ASS-overlay grid (see git history before
+UKE-29's Chromium pivot) - now the browser-based admin UI (admin_server.py,
+admin_ui/index.html) fetches each poster directly as its own image and lays
+out the grid itself in real CSS, so all that's needed here is generating and
+caching the individual poster files.
 
 Generation only ever happens explicitly - during ``nostalgiabox --check``
 (and so also during ``scripts/install.sh``) - never on the fly while
@@ -27,9 +22,8 @@ import logging
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 from .channel import Channel
 from .probe import DEFAULT_EPISODE_SECONDS, probe_duration
@@ -37,75 +31,10 @@ from .probe import DEFAULT_EPISODE_SECONDS, probe_duration
 log = logging.getLogger(__name__)
 
 THUMBS_SUBDIR = "thumbnails"
-GRID_FILENAME = "show_grid.jpg"
-
-# The grid is composed at the same resolution the video ends up at after the
-# app's force_4_3 filter (see player.MpvPlayer) - 960x720 - so it passes
-# through that filter chain unchanged when played.
-_GRID_W = 960
-_GRID_H = 720
-
-# Layout of the poster grid - kept in sync with the section-label/highlight-
-# ring positions overlay.py draws on top, via admin_section_layout() below.
-# Real channels and game systems are grouped into named "Shows"/"Games"
-# swimlanes (UKE-29) - each its own single horizontal row, sized to fit
-# however many tiles it holds (no scrolling/pagination - the same tradeoff
-# the single flat grid this replaces already made). This is safe to bake
-# into the once-per---check background image, unlike the Continue Watching
-# row (see overlay.py): which shows/games exist only changes when the
-# config does, not on every watch.
-_GRID_MARGIN_X = 56
-# Reserves room for the "Select a channel" header line *and*, below it, the
-# "Continue Watching" text row overlay.py draws (see CONTINUE_LIMIT there).
-# This is baked into the pre-generated background image (see module
-# docstring), so the space is always reserved even on a run with nothing
-# in progress - there's no way to know that at --check time, only at browse
-# time. A public constant (not a leading underscore) since overlay.py needs
-# it to position the continue-watching text at the same header height.
-GRID_HEADER_H = 188
-_GRID_FOOTER_H = 56
-_SECTION_LABEL_H = 22
-_SECTION_LABEL_GAP = 8
-_SECTION_ROW_GAP = 12
-_GRID_LABEL_H = 58  # room below each tile for its title/subtitle text
-_TILE_GAP = 24
-_TILE_MAX_W = 240
-_POSTER_ASPECT = 16 / 9
-
-_BG_COLOR = (0x14, 0x14, 0x14)
-_PLACEHOLDER_COLOR = (0x2A, 0x2A, 0x2A)
-
-
-@dataclass(frozen=True)
-class SectionTile:
-    """One poster's pixel rect within a section's row."""
-
-    channel: Channel
-    x: int
-    y: int
-    w: int
-    h: int
-
-
-@dataclass(frozen=True)
-class Section:
-    """One named swimlane ("Shows", "Games") and its laid-out tiles."""
-
-    title: str
-    label_y: int
-    tiles: List[SectionTile] = field(default_factory=list)
 
 
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
-
-
-def pillow_available() -> bool:
-    try:
-        import PIL  # noqa: F401
-    except ImportError:
-        return False
-    return True
 
 
 def _slugify(name: str) -> str:
@@ -113,53 +42,14 @@ def _slugify(name: str) -> str:
     return slug or "show"
 
 
-def admin_sections(tiles: Sequence[Channel]) -> List[Tuple[str, List[Channel]]]:
-    """Split combined admin tiles (real channels + game systems, in
-    :meth:`nostalgiabox.app.TVApp._admin_tiles` order) into the named
-    swimlanes the admin browse screen groups them into - "Shows" then
-    "Games", each only present if it actually has anything in it. A
-    channel's ``config.kind`` is the only thing that decides which lane
-    it's in.
+def poster_filename(channel: Channel) -> str:
+    """The on-disk (and, for the browser admin UI, URL) name a channel's
+    poster is cached under - the one place this naming scheme is defined,
+    shared by ensure_channel_poster below and TVApp's admin state snapshot
+    (app.py) so a poster URL the browser is given always matches a real
+    file on disk.
     """
-    shows = [c for c in tiles if c.config.kind != "game"]
-    games = [c for c in tiles if c.config.kind == "game"]
-    sections: List[Tuple[str, List[Channel]]] = []
-    if shows:
-        sections.append(("Shows", shows))
-    if games:
-        sections.append(("Games", games))
-    return sections
-
-
-def admin_section_layout(tiles: Sequence[Channel]) -> List[Section]:
-    """Pixel layout - in the same local (0,0)-(960,720) coordinate space the
-    composed grid image is drawn in - for every section's label and tiles.
-    The one shared source of truth between the background image
-    (:func:`compose_show_grid`) and overlay.py's section-label/highlight-
-    ring drawing, so they can never drift apart.
-
-    Each section is one horizontal row, tiles sized to fit however many it
-    holds (capped at ``_TILE_MAX_W`` so a lone show/system doesn't get a
-    giant poster) - no scrolling or pagination, the same tradeoff the
-    single flat grid this replaces already made.
-    """
-    usable_w = _GRID_W - _GRID_MARGIN_X * 2
-    y = GRID_HEADER_H
-    sections: List[Section] = []
-    for title, channels in admin_sections(tiles):
-        label_y = y
-        row_y = label_y + _SECTION_LABEL_H + _SECTION_LABEL_GAP
-        count = len(channels)
-        tile_w = min(_TILE_MAX_W, (usable_w - _TILE_GAP * (count - 1)) // count)
-        tile_h = int(tile_w / _POSTER_ASPECT)
-        x = _GRID_MARGIN_X
-        section_tiles: List[SectionTile] = []
-        for channel in channels:
-            section_tiles.append(SectionTile(channel=channel, x=x, y=row_y, w=tile_w, h=tile_h))
-            x += tile_w + _TILE_GAP
-        sections.append(Section(title=title, label_y=label_y, tiles=section_tiles))
-        y = row_y + tile_h + _GRID_LABEL_H + _SECTION_ROW_GAP
-    return sections
+    return f"channel-{channel.number:02d}-{_slugify(channel.name)}.jpg"
 
 
 def _run(cmd: List[str]) -> None:
@@ -194,13 +84,13 @@ def ensure_channel_poster(
     source episode is newer than the cached poster (or there isn't one yet).
     Returns None if the channel has no episodes, ffmpeg is unavailable, or
     it's a game channel (a ROM file isn't something ffmpeg can grab a frame
-    from - compose_show_grid falls back to a plain placeholder tile for
+    from - the browser admin UI falls back to a plain placeholder tile for
     these, same as it does for any channel with no poster).
     """
     if channel.is_empty or channel.config.kind == "game":
         return None
     source = channel.episodes[0]
-    out_path = cache_dir / f"channel-{channel.number:02d}-{_slugify(channel.name)}.jpg"
+    out_path = cache_dir / poster_filename(channel)
 
     if not force and out_path.exists():
         try:
@@ -234,80 +124,26 @@ def ensure_all_posters(
     return posters
 
 
-def _cover_resize(img, width: int, height: int):
-    from PIL import Image
-
-    src_w, src_h = img.size
-    scale = max(width / src_w, height / src_h)
-    new_w, new_h = max(1, round(src_w * scale)), max(1, round(src_h * scale))
-    img = img.resize((new_w, new_h), Image.LANCZOS)
-    left = (new_w - width) // 2
-    top = (new_h - height) // 2
-    return img.crop((left, top, left + width, top + height))
-
-
-def compose_show_grid(
-    tiles: Sequence[Channel], posters: Dict[int, Path], out_path: Path
-) -> Optional[Path]:
-    """Render the full show-grid background image: dark backdrop plus every
-    channel's poster (or a plain placeholder tile if it has none - this is
-    what every game-system tile gets, since a ROM has no frame to grab),
-    positioned via :func:`admin_section_layout` so overlay.py's section
-    labels and highlight ring line up with it exactly. ``tiles`` is real
-    channels and game systems combined, in the order they should appear.
-    """
-    if not pillow_available():
-        log.warning("Pillow not available; cannot compose the admin show grid")
-        return None
-    from PIL import Image
-
-    bg = Image.new("RGB", (_GRID_W, _GRID_H), _BG_COLOR)
-    for section in admin_section_layout(list(tiles)):
-        for tile in section.tiles:
-            poster_path = posters.get(tile.channel.number)
-            img = None
-            if poster_path is not None and poster_path.exists():
-                try:
-                    with Image.open(poster_path) as src:
-                        img = _cover_resize(src.convert("RGB"), tile.w, tile.h)
-                except OSError:
-                    img = None
-            if img is None:
-                img = Image.new("RGB", (tile.w, tile.h), _PLACEHOLDER_COLOR)
-            bg.paste(img, (tile.x, tile.y))
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    bg.save(out_path, quality=88)
-    return out_path
-
-
 def generate_admin_assets(
     tiles: Sequence[Channel], cache_dir: Path, *, force: bool = False
-) -> Optional[Path]:
+) -> Dict[int, Path]:
     """Top-level entry point used by ``--check``: (re)generate any missing/
-    stale channel posters, then compose the full show-grid background.
-    Best-effort throughout - returns None (and logs a warning) rather than
-    raising, so a missing ffmpeg/Pillow never breaks config validation.
+    stale channel posters. Best-effort throughout - a missing ffmpeg/Pillow
+    never breaks config validation, it just means fewer (or no) posters are
+    available and the browser admin UI falls back to placeholder tiles.
     ``tiles`` is real channels and game systems combined (see
-    ``nostalgiabox.app.TVApp._admin_tiles``).
+    ``nostalgiabox.app.TVApp._admin_tiles``). Returns the posters that were
+    generated or already cached, keyed by channel number.
     """
-    posters = ensure_all_posters(tiles, cache_dir, force=force)
-    return compose_show_grid(tiles, posters, cache_dir / GRID_FILENAME)
+    return ensure_all_posters(tiles, cache_dir, force=force)
 
 
 __all__ = [
     "THUMBS_SUBDIR",
-    "GRID_FILENAME",
-    "GRID_HEADER_H",
-    "Section",
-    "SectionTile",
     "ffmpeg_available",
-    "pillow_available",
-    "admin_sections",
-    "admin_section_layout",
+    "poster_filename",
     "extract_poster",
     "ensure_channel_poster",
     "ensure_all_posters",
-    "compose_show_grid",
     "generate_admin_assets",
 ]

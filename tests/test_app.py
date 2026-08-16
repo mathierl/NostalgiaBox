@@ -10,7 +10,14 @@ from tests.helpers import FakeClock, make_show
 
 
 def build_app(
-    tmp_path, *, assets_dir=None, game_launcher=None, player_factory=None, watch_state=None, **overrides
+    tmp_path,
+    *,
+    assets_dir=None,
+    game_launcher=None,
+    player_factory=None,
+    watch_state=None,
+    admin_ui_launcher=None,
+    **overrides,
 ):
     for name in ("dragon", "arthur", "rugrats"):
         make_show(tmp_path, name, 4)
@@ -38,6 +45,7 @@ def build_app(
         game_launcher=game_launcher,
         player_factory=player_factory,
         watch_state=watch_state,
+        admin_ui_launcher=admin_ui_launcher,
     )
     return app, player, clock
 
@@ -315,6 +323,10 @@ def test_resume_mode_restarts_where_left(tmp_path):
 
 
 def test_admin_toggle_opens_show_grid(tmp_path):
+    # The grid/episode-list screens are rendered by the browser-based admin
+    # UI now (UKE-29), not ASS overlays - see admin_server.py. TVApp's job
+    # is just to expose the right state for it to poll (_admin_state_snapshot),
+    # and to hand mpv's display over to a browser process.
     app, player, _ = build_app(tmp_path)
     app.start()
     assert not app.admin_mode
@@ -322,10 +334,13 @@ def test_admin_toggle_opens_show_grid(tmp_path):
     assert app.admin_mode
     assert app.admin_browsing and not app.admin_episode_browsing
     assert app._browse_number == 2  # cursor starts on whatever's playing
-    panel = player.overlays.get(5, "")
-    assert "Select a channel" in panel
-    assert "Dragon Tales" in panel and "Arthur" in panel and "Rugrats" in panel
-    assert "4 eps" in panel
+    assert player.closed is True  # mpv's display was handed to the admin UI
+
+    snapshot = app._admin_state_snapshot()
+    assert snapshot["mode"] == "grid"
+    names = [t["name"] for s in snapshot["sections"] for t in s["tiles"]]
+    assert names == ["Dragon Tales", "Arthur", "Rugrats"]
+    assert all(t["count_label"] == "4 eps" for s in snapshot["sections"] for t in s["tiles"])
 
 
 def test_admin_toggle_off_by_default_mute_still_mutes(tmp_path):
@@ -379,8 +394,10 @@ def test_mute_on_grid_opens_episode_list_without_tuning(tmp_path):
     assert app._browse_episode_index == 0
     assert app.lineup.current.number == 2  # selecting a show doesn't tune yet
     assert player.muted is False
-    panel = player.overlays.get(5, "")
-    assert "Dragon Tales" in panel and "Select an episode" in panel
+    snapshot = app._admin_state_snapshot()
+    assert snapshot["mode"] == "episode_list"
+    assert snapshot["episode_list"]["channel_name"] == "Dragon Tales"
+    assert snapshot["episode_list"]["total"] == 4
 
 
 def test_channel_up_down_move_episode_cursor(tmp_path):
@@ -426,7 +443,7 @@ def test_power_backs_out_of_episode_list_to_grid(tmp_path):
     assert not app.admin_episode_browsing
     assert app.admin_browsing
     assert not app.standby  # power backed out, it did not toggle standby
-    assert "Select a channel" in player.overlays.get(5, "")
+    assert app._admin_state_snapshot()["mode"] == "grid"
 
 
 def test_admin_toggle_exits_directly_from_episode_list(tmp_path):
@@ -547,9 +564,10 @@ def test_game_system_appears_in_admin_grid(tmp_path):
     app, player, _ = build_app(tmp_path, **_games_override(tmp_path, roms=2))
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    panel = player.overlays.get(5, "")
-    assert "SNES" in panel
-    assert "2 games" in panel
+    snapshot = app._admin_state_snapshot()
+    games_section = next(s for s in snapshot["sections"] if s["kind"] == "games")
+    assert games_section["tiles"][0]["name"] == "SNES"
+    assert games_section["tiles"][0]["count_label"] == "2 games"
     assert app.games[0].number == 5  # continues on from the highest real channel (4)
 
 
@@ -564,8 +582,10 @@ def test_can_navigate_onto_and_into_a_game_system(tmp_path):
     send(app, Action.MUTE)  # confirm SNES -> its game list
     assert app.admin_episode_browsing
     assert app._browse_episode_number == 5
-    panel = player.overlays.get(5, "")
-    assert "SNES" in panel and "Select a game" in panel
+    snapshot = app._admin_state_snapshot()
+    assert snapshot["mode"] == "episode_list"
+    assert snapshot["episode_list"]["channel_name"] == "SNES"
+    assert snapshot["episode_list"]["kind"] == "game"
 
 
 def test_confirming_a_game_calls_the_launcher_and_stays_on_the_list(tmp_path):
@@ -619,7 +639,17 @@ def test_confirming_a_second_game_works_after_returning_to_the_list(tmp_path):
     assert calls == list(app.games[0].episodes)  # both, in order
 
 
-def test_game_launch_stops_and_recreates_player_via_factory(tmp_path):
+def test_game_launch_reopens_the_admin_ui_not_mpv(tmp_path):
+    # mpv is closed once, when admin mode is entered (the display goes to
+    # the browser admin UI - see app.py's _open_admin_ui) - a game launch
+    # from within that session closes/reopens *the browser*, not mpv, since
+    # mpv was never showing the game list to begin with. player_factory
+    # only gets called when admin mode is exited entirely (see the next
+    # test) - this is the real behavioural change from the old ASS-overlay
+    # design, where mpv itself displayed the poster grid and so needed
+    # reopening around every game launch.
+    from tests.helpers import make_admin_ui_launcher
+
     created = []
 
     def factory():
@@ -627,10 +657,46 @@ def test_game_launch_stops_and_recreates_player_via_factory(tmp_path):
         created.append(p)
         return p
 
+    launcher, calls, processes = make_admin_ui_launcher()
     app, player1, _ = build_app(
         tmp_path,
         game_launcher=lambda core, rom: 0,
         player_factory=factory,
+        admin_ui_launcher=launcher,
+        **_games_override(tmp_path),
+    )
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    assert player1.closed is True
+    assert len(calls) == 1  # admin UI launched once, entering admin mode
+
+    send(app, Action.CHANNEL_DOWN)
+    send(app, Action.VOLUME_UP)
+    send(app, Action.MUTE)  # into SNES's game list
+    send(app, Action.MUTE)  # confirm and launch
+
+    assert created == []  # mpv was never touched by the game launch
+    assert app.player is player1
+    assert processes[0].terminated is True  # the first admin-UI process was closed...
+    assert len(calls) == 2  # ...and a fresh one launched to show the game list again
+
+
+def test_exiting_admin_mode_after_a_game_recreates_player_via_factory(tmp_path):
+    from tests.helpers import make_admin_ui_launcher
+
+    created = []
+
+    def factory():
+        p = MockPlayer()
+        created.append(p)
+        return p
+
+    launcher, calls, processes = make_admin_ui_launcher()
+    app, player1, _ = build_app(
+        tmp_path,
+        game_launcher=lambda core, rom: 0,
+        player_factory=factory,
+        admin_ui_launcher=launcher,
         **_games_override(tmp_path),
     )
     app.start()
@@ -638,15 +704,63 @@ def test_game_launch_stops_and_recreates_player_via_factory(tmp_path):
     send(app, Action.CHANNEL_DOWN)
     send(app, Action.VOLUME_UP)
     send(app, Action.MUTE)  # into SNES's game list
-    send(app, Action.MUTE)  # confirm and launch
+    send(app, Action.MUTE)  # confirm and launch a game
+    send(app, Action.ADMIN_TOGGLE)  # exit admin mode entirely
 
-    assert player1.closed is True
+    assert processes[-1].terminated is True  # the admin UI was closed for good
     assert len(created) == 1
     assert app.player is created[0]
     assert app.player is not player1
     # volume/mute state carried over onto the freshly (re)created player
     assert app.player.volume == app.volume
     assert app.player.muted == app.muted
+
+
+def test_admin_ui_launch_failure_falls_back_to_the_normal_picture(tmp_path):
+    # A dead black screen (mpv closed, no browser, nothing) would be a much
+    # worse failure than just not entering admin mode at all.
+    app, player, _ = build_app(tmp_path, admin_ui_launcher=lambda url: None)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    assert not app.admin_mode
+    assert not app.admin_browsing
+    assert player.current is not None  # normal playback resumed, not left blank
+
+
+def test_admin_ui_launcher_exception_falls_back_to_the_normal_picture(tmp_path):
+    def boom(url):
+        raise RuntimeError("no chromium binary")
+
+    app, player, _ = build_app(tmp_path, admin_ui_launcher=boom)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    assert not app.admin_mode
+    assert player.current is not None
+
+
+def test_standby_while_admin_ui_open_closes_it_and_gets_a_live_player_back(tmp_path):
+    from tests.helpers import make_admin_ui_launcher
+
+    created = []
+
+    def factory():
+        p = MockPlayer()
+        created.append(p)
+        return p
+
+    launcher, calls, processes = make_admin_ui_launcher()
+    app, player1, _ = build_app(tmp_path, admin_ui_launcher=launcher, player_factory=factory)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    assert app.admin_mode
+
+    send(app, Action.POWER)  # standby - must not leave the browser hanging open
+
+    assert app.standby
+    assert not app.admin_mode
+    assert processes[0].terminated is True
+    assert len(created) == 1  # a live player was reopened before .stop()/overlay calls
+    assert app.player is created[0]
 
 
 def test_game_launch_without_a_player_factory_reuses_the_same_player(tmp_path):

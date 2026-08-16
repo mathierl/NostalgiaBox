@@ -74,27 +74,29 @@ def _cmd_check(config: Config) -> int:
 
 
 def _generate_admin_thumbnails(config: Config, tiles) -> None:
-    """(Re)generate the admin-mode show-grid poster art, best-effort.
+    """(Re)generate the admin-mode poster art, best-effort.
 
     Runs as part of --check (and so scripts/install.sh) rather than at
     runtime, so opening the admin view on the Pi is always instant. Missing
-    ffmpeg/Pillow, or a failed extraction, only produces a warning - it
-    never blocks config validation. ``tiles`` is real channels and game
-    systems combined, same order the admin browse grid will show them in.
+    ffmpeg, or a failed extraction, only produces a warning - it never
+    blocks config validation. ``tiles`` is real channels and game systems
+    combined; game systems never get a poster (no frame to grab from a ROM),
+    the browser admin UI shows a placeholder tile for those.
     """
     from .static_gen import DEFAULT_ASSETS_DIR
-    from .thumbnails import THUMBS_SUBDIR, ffmpeg_available, generate_admin_assets, pillow_available
+    from .thumbnails import THUMBS_SUBDIR, ffmpeg_available, generate_admin_assets
 
-    if not ffmpeg_available() or not pillow_available():
+    if not ffmpeg_available():
         print(
-            "admin-mode posters: skipped (needs ffmpeg and Pillow - "
-            "run `pip install .[pi]` / `sudo apt install ffmpeg`)"
+            "admin-mode posters: skipped (needs ffmpeg - "
+            "run `sudo apt install ffmpeg`)"
         )
         return
     cache_dir = (config.assets_dir or DEFAULT_ASSETS_DIR) / THUMBS_SUBDIR
-    result = generate_admin_assets(tiles, cache_dir)
-    if result is not None:
-        print(f"admin-mode posters: ready ({cache_dir})")
+    posters = generate_admin_assets(tiles, cache_dir)
+    show_count = sum(1 for c in tiles if c.config.kind != "game" and not c.is_empty)
+    if posters or show_count == 0:
+        print(f"admin-mode posters: ready ({len(posters)}/{show_count} at {cache_dir})")
     else:
         print("admin-mode posters: could not be generated (see warnings above)")
 

@@ -22,7 +22,17 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from .actions import Action, InputEvent
-from .channel import Channel, ChannelLineup, PlayRequest, build_game_channels, build_lineup
+from .admin_server import AdminServer
+from .channel import (
+    Channel,
+    ChannelLineup,
+    PlayRequest,
+    build_game_channels,
+    build_lineup,
+    detect_season,
+    episode_title,
+    item_label,
+)
 from .config import Config
 from .input.manager import InputManager, create_backends
 from .overlay import OverlayManager
@@ -71,6 +81,63 @@ def _default_game_launcher(core: str, rom: Path) -> int:
         return 1
 
 
+class _NullAdminUiProcess:
+    """Stand-in "process handle" for when nothing real was launched (dry-run
+    / most tests - see _noop_admin_ui_launcher). Duck-types the bit of
+    subprocess.Popen's interface TVApp actually uses.
+    """
+
+    def terminate(self) -> None:
+        pass
+
+    def kill(self) -> None:
+        pass
+
+    def wait(self, timeout: Optional[float] = None) -> int:
+        return 0
+
+
+def _noop_admin_ui_launcher(url: str) -> _NullAdminUiProcess:
+    """Default admin_ui_launcher when TVApp is built directly (dry-run, and
+    every test that doesn't specifically care about the browser handoff -
+    which, unlike game launches, is *not* an opt-in action a test can just
+    avoid triggering: entering admin mode at all goes through this). Returns
+    a harmless stand-in instead of actually spawning a browser - from_config
+    wires up _default_admin_ui_launcher for real hardware.
+    """
+    return _NullAdminUiProcess()
+
+
+def _default_admin_ui_launcher(url: str) -> subprocess.Popen:
+    """Launch Chromium in kiosk mode against the admin server, non-blocking:
+    unlike _default_game_launcher (which blocks, because RetroArch
+    legitimately owns the whole box until it exits), the main loop has to
+    keep running while the browser is up - it's the thing feeding /state
+    updates as the cursor moves (see admin_server.py's module docstring).
+
+    --ozone-platform=drm is Chromium's own native DRM/KMS backend: this Pi
+    has no X11/Wayland session at all (mpv talks DRM/KMS directly), so a
+    normal desktop Chromium build has no window server to hand it a window.
+    See scripts/spike_mpv_chromium_handoff.py, which exists specifically to
+    validate this on real hardware before this default is trusted.
+    """
+    import shutil
+
+    chromium = shutil.which("chromium-browser") or shutil.which("chromium") or "chromium"
+    cmd = [
+        chromium,
+        "--ozone-platform=drm",
+        "--enable-features=UseOzonePlatform",
+        "--kiosk",
+        "--noerrdialogs",
+        "--disable-infobars",
+        "--disable-session-crashed-bubble",
+        "--incognito",
+        url,
+    ]
+    return subprocess.Popen(cmd)
+
+
 class TVApp:
     """The retro-TV application state machine."""
 
@@ -86,6 +153,8 @@ class TVApp:
         player_factory: Optional[Callable[[], Player]] = None,
         game_launcher: Optional[Callable[[str, Path], int]] = None,
         watch_state: Optional[WatchState] = None,
+        admin_ui_launcher: Optional[Callable[[str], object]] = None,
+        admin_server: Optional["AdminServer"] = None,
     ) -> None:
         self.config = config
         self.player = player
@@ -103,6 +172,16 @@ class TVApp:
         # a game.
         self._player_factory = player_factory
         self._game_launcher = game_launcher or _default_game_launcher
+        # Browser-based admin UI (UKE-29): admin_server is the local HTTP
+        # server the browser polls (None by default - as in most tests -
+        # means "don't run a real server"; from_config wires up a real one).
+        # admin_ui_launcher defaults to a harmless no-op rather than
+        # _default_admin_ui_launcher the way game_launcher does, because
+        # entering admin mode at all - unlike launching a game - isn't
+        # something most tests can just avoid triggering.
+        self._admin_server = admin_server
+        self._admin_ui_launcher = admin_ui_launcher or _noop_admin_ui_launcher
+        self._admin_ui_process: Optional[object] = None
 
         self.lineup: ChannelLineup = build_lineup(config)
         # Game systems (see UKE-28): shown in the admin browse grid alongside
@@ -217,14 +296,24 @@ class TVApp:
         assets = assets_dir or config.assets_dir or DEFAULT_ASSETS_DIR
         watch_state = WatchState(assets / STATE_SUBDIR / STATE_FILENAME)
 
-        return cls(
+        app = cls(
             config,
             player,
             input_manager,
             assets_dir=assets_dir,
             player_factory=player_factory,
             watch_state=watch_state,
+            admin_ui_launcher=_default_admin_ui_launcher,
         )
+        # Attached after construction since the server's state_provider is a
+        # bound method of app itself - only actually called once the browser
+        # is up and polling, by which point app fully exists either way.
+        app._admin_server = AdminServer(
+            html_path=Path(__file__).resolve().parent / "admin_ui" / "index.html",
+            poster_dir=app._admin_thumbs_cache_dir(),
+            state_provider=app._admin_state_snapshot,
+        )
+        return app
 
     # -- lifecycle ----------------------------------------------------------
     def start(self) -> None:
@@ -520,8 +609,7 @@ class TVApp:
             self._refresh_continue_entries()
             self._pre_admin_path = self._playing_path
             self._pre_admin_pos = self.player.get_time_pos() or 0.0
-            self._show_admin_grid_background()
-            self._refresh_admin_panel()
+            self._open_admin_ui()
         else:
             self.admin_browsing = False
             self.admin_episode_browsing = False
@@ -529,6 +617,8 @@ class TVApp:
             if self.paused:
                 self._toggle_pause()
             self.overlay.clear_admin_panel()
+            self._close_admin_ui()
+            self._reopen_player()
             if self._pre_admin_path is not None:
                 # Nothing new was picked this session - resume exactly where
                 # we left off rather than restarting/re-shuffling.
@@ -536,21 +626,82 @@ class TVApp:
                 self._pre_admin_path = None
             self._show_info()
 
+    def _open_admin_ui(self) -> None:
+        """Close mpv and hand the display to the browser-based admin UI (see
+        admin_server.py): the grid and episode-list screens are rendered
+        there now, not as ASS overlays - see UKE-29. Non-blocking (the
+        launcher is expected to return immediately, e.g. via
+        subprocess.Popen) since, unlike a game launch, the main loop has to
+        keep running while the browser is up: it's what actually moves the
+        cursor the browser is polling for (see TVApp._admin_state_snapshot).
+
+        Falls back to reopening the normal picture if the browser fails to
+        start at all, rather than leaving the box on a dead black screen.
+        """
+        if self._admin_server is not None:
+            self._admin_server.start()  # idempotent - no-op if already running
+        url = self._admin_server.url if self._admin_server is not None else "about:blank"
+        self.player.close()
+        try:
+            process = self._admin_ui_launcher(url)
+        except Exception:  # noqa: BLE001
+            log.exception("failed to launch admin UI")
+            process = None
+        if process is None:
+            log.warning("admin UI failed to start - falling back to the normal picture")
+            self._reopen_player()
+            self.admin_mode = False
+            self.admin_browsing = False
+            self.admin_episode_browsing = False
+            if self._pre_admin_path is not None:
+                self._play_request(PlayRequest(path=self._pre_admin_path, start=self._pre_admin_pos))
+                self._pre_admin_path = None
+            return
+        self._admin_ui_process = process
+
+    def _close_admin_ui(self) -> None:
+        """Terminate the browser process, if one is open. Leaves mpv closed
+        either way - callers decide what (if anything) to reopen next, since
+        that differs between "admin mode is done" (a fresh mpv) and "a game
+        was launched from the game list" (back to the admin UI - see
+        _launch_game).
+        """
+        process = self._admin_ui_process
+        if process is None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            try:
+                process.kill()
+                process.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                pass
+        self._admin_ui_process = None
+
+    def _reopen_player(self) -> None:
+        """Rebuild mpv via the injected factory (real hardware only - see
+        __init__); with no factory (dry-run / most tests) this is a no-op,
+        the same MockPlayer instance is reused throughout.
+        """
+        if self._player_factory is None:
+            return
+        self.player = self._player_factory()
+        self.player.on_end = self._ended.put
+        self.player.set_volume(self.volume)
+        self.player.set_mute(self.muted)
+
     def _refresh_admin_panel(self) -> None:
         if not self.admin_mode:
             return
-        if self.admin_episode_browsing:
-            channel = self._channel_by_number(self._browse_episode_number)
-            if channel is not None:
-                self.overlay.show_admin_episode_list(channel, highlight_index=self._browse_episode_index)
-            return
-        if self.admin_browsing:
-            self.overlay.show_admin_browser(
-                self._admin_tiles(),
-                highlight_number=self._browse_number,
-                continue_entries=self._continue_entries,
-                continue_index=self._browse_continue_index,
-            )
+        if self.admin_episode_browsing or self.admin_browsing:
+            # Nothing to push - the browser polls GET /state itself (see
+            # admin_server.py), which always reflects the current cursor
+            # position live. Kept as a no-op call site (rather than removed)
+            # so every place that used to need to "tell the overlay to
+            # redraw" after a cursor move still has somewhere to do it, in
+            # case a future renderer needs pushing again.
             return
         self.overlay.show_admin_panel(self.lineup, paused=self.paused)
 
@@ -561,6 +712,115 @@ class TVApp:
         grid is (re)entered rather than kept incrementally up to date.
         """
         self._continue_entries = continue_watching(list(self.lineup), self.watch_state, limit=3)
+
+    # -- browser-based admin UI (see admin_server.py) -----------------------
+    # Everything below is pure presentation: it reads the same cursor/section
+    # state the ASS renderer above reads, just packaged as JSON instead of
+    # ASS markup. Called on every GET /state poll, so it stays cheap - no
+    # disk IO beyond watch_state's already-in-memory dict, no subprocess
+    # calls (poster existence is a stat(), not a generation).
+    def _admin_state_snapshot(self) -> dict:
+        if self.admin_episode_browsing:
+            return {"mode": "episode_list", "episode_list": self._episode_list_snapshot()}
+        return {"mode": "grid", **self._grid_snapshot()}
+
+    def _grid_snapshot(self) -> dict:
+        continue_index = self._browse_continue_index
+        continue_items = [
+            {
+                "index": i,
+                "channel_number": entry.channel_number,
+                "channel_name": entry.channel_name,
+                "title": entry.title,
+                "minutes_left": entry.minutes_left,
+                "selected": continue_index == i,
+            }
+            for i, entry in enumerate(self._continue_entries)
+        ]
+
+        sections = []
+        for title, key in (("Shows", "shows"), ("Games", "games")):
+            tiles = self._section_tiles(key)
+            if not tiles:
+                continue
+            sections.append({"title": title, "kind": key, "tiles": [self._tile_snapshot(c, continue_index) for c in tiles]})
+
+        return {"continue": continue_items, "sections": sections}
+
+    def _tile_snapshot(self, channel: Channel, continue_index: Optional[int]) -> dict:
+        from .thumbnails import poster_filename
+
+        count = len(channel.episodes)
+        is_game = channel.config.kind == "game"
+        watched_count: Optional[int] = None
+        if self.watch_state is not None:
+            if is_game:
+                watched_count = sum(
+                    1
+                    for rom in channel.episodes
+                    if self.watch_state.game_state(channel.number, channel.config.path, rom).played
+                )
+            else:
+                watched_count = sum(
+                    1
+                    for ep in channel.episodes
+                    if self.watch_state.episode_state(channel.number, channel.config.path, ep).watched
+                )
+        poster_url = None
+        if channel.config.kind != "game":
+            poster_path = self._admin_thumbs_cache_dir() / poster_filename(channel)
+            if poster_path.is_file():
+                poster_url = f"/poster/{poster_filename(channel)}"
+        return {
+            "number": channel.number,
+            "name": channel.name,
+            "kind": channel.config.kind,
+            "count": count,
+            "count_label": f"{count} {item_label(channel, count)}",
+            "poster_url": poster_url,
+            "selected": continue_index is None and channel.number == self._browse_number,
+            "watched_count": watched_count,
+            "all_watched": bool(watched_count is not None and count > 0 and watched_count == count),
+        }
+
+    def _episode_list_snapshot(self) -> dict:
+        channel = self._channel_by_number(self._browse_episode_number)
+        if channel is None:
+            return {}
+        episodes = []
+        is_game = channel.config.kind == "game"
+        for i, path in enumerate(channel.episodes):
+            watched = False
+            in_progress = False
+            if self.watch_state is not None:
+                if is_game:
+                    # Games have no position/duration to be "in progress" at
+                    # (see watch_state.py) - just played or not.
+                    watched = self.watch_state.game_state(channel.number, channel.config.path, path).played
+                else:
+                    state = self.watch_state.episode_state(channel.number, channel.config.path, path)
+                    watched = state.watched
+                    in_progress = state.in_progress
+            episodes.append(
+                {
+                    "index": i,
+                    "title": episode_title(path),
+                    "season": detect_season(str(path)),
+                    "watched": watched,
+                    "in_progress": in_progress,
+                    "selected": i == self._browse_episode_index,
+                }
+            )
+        count = len(channel.episodes)
+        return {
+            "channel_number": channel.number,
+            "channel_name": channel.name,
+            "kind": channel.config.kind,
+            "item_label": item_label(channel, count),
+            "total": count,
+            "highlight_index": self._browse_episode_index,
+            "episodes": episodes,
+        }
 
     def _admin_tiles(self) -> List[Channel]:
         """Every tile the admin browse grid shows: real channels, then game
@@ -581,22 +841,6 @@ class TVApp:
         from .thumbnails import THUMBS_SUBDIR
 
         return self._assets_dir / THUMBS_SUBDIR
-
-    def _show_admin_grid_background(self) -> None:
-        """Swap the player onto the pre-composed poster-grid image (see
-        nostalgiabox.thumbnails) so real show art fills the screen behind the
-        highlight ring/labels overlay.show_admin_browser draws. If it hasn't
-        been generated yet (--check was never run since adding shows), this
-        is a no-op - the browse overlay still works, just without posters,
-        drawn over whatever was already playing.
-        """
-        from .thumbnails import GRID_FILENAME
-
-        image_path = self._admin_thumbs_cache_dir() / GRID_FILENAME
-        if image_path.is_file():
-            self.player.play_loop(image_path)
-        else:
-            log.info("admin show-grid image not found (run `nostalgiabox --check`)")
 
     def _section_tiles(self, key: str) -> List[Channel]:
         """The channels/game systems in one named browse row. 'continue'
@@ -749,17 +993,19 @@ class TVApp:
         """Hand the display to RetroArch for one game, then return to
         exactly the admin browse screen the game was launched from.
 
-        Confirmed safe on real hardware by
-        scripts/spike_mpv_retroarch_handoff.py (UKE-28): closing mpv
-        releases the DRM master fast enough for RetroArch to get a picture,
-        and a fresh MpvPlayer reopens cleanly afterward - repeatedly, not
-        just once.
+        The display at this point is the browser admin UI, not mpv (mpv was
+        already closed when admin mode was entered - see _open_admin_ui), so
+        this closes/reopens *that*, not mpv directly. The underlying mpv
+        DRM-release timing this depends on was confirmed safe on real
+        hardware by scripts/spike_mpv_retroarch_handoff.py (UKE-28); the
+        Chromium side of this same handoff is what
+        scripts/spike_mpv_chromium_handoff.py exists to validate (UKE-29).
         """
         core = channel.config.core
         if not core:
             log.warning("game channel %r has no core configured; not launching", channel.name)
             return
-        self.player.close()
+        self._close_admin_ui()
         try:
             self._game_launcher(core, rom_path)
         finally:
@@ -768,15 +1014,10 @@ class TVApp:
                 # no duration or position signal, so "played" is the honest
                 # v1 semantic regardless of exit code.
                 self.watch_state.record_game_played(channel.number, channel.config.path, rom_path)
-            if self._player_factory is not None:
-                self.player = self._player_factory()
-                self.player.on_end = self._ended.put
-                self.player.set_volume(self.volume)
-                self.player.set_mute(self.muted)
-            # Back to browsing: re-arm the poster-grid loop image (the same
-            # thing _toggle_admin_mode does on entry) so the episode-list/
-            # grid overlay has its usual backdrop again.
-            self._show_admin_grid_background()
+            # Back to browsing: reopen the admin UI (the same thing
+            # _toggle_admin_mode does on entry) so the game list is showing
+            # again, exactly where this game was launched from.
+            self._open_admin_ui()
 
     def _play_specific_episode(self, channel_number: int, episode_path: Path, *, start: float = 0.0) -> None:
         """Play exactly this episode (picked from the admin episode list, or
@@ -825,6 +1066,11 @@ class TVApp:
             self._continue_entries = []
             self._pre_admin_path = None
             self.paused = False
+            if self._admin_ui_process is not None:
+                # The admin UI (browser) was up, not mpv - close it and get
+                # a live player back before touching it below.
+                self._close_admin_ui()
+                self._reopen_player()
             self.player.stop()
             self.overlay.clear_all()
             self.overlay.show_standby()

@@ -55,6 +55,16 @@ def detect_season(text: str) -> Optional[int]:
 _EPISODE_BRACKET_ID = re.compile(r"\s*\[[^\[\]]*\]\s*$")
 
 
+def item_label(channel: "Channel", count: int) -> str:
+    """The noun a browse tile/list's count refers to: 'game'/'games' for a
+    game system, 'ep'/'eps' for a show - shared by the ASS episode list
+    (overlay.py) and the browser-based admin UI's state snapshot (app.py).
+    """
+    if channel.config.kind == "game":
+        return "game" if count == 1 else "games"
+    return "ep" if count == 1 else "eps"
+
+
 def episode_title(path: Path) -> str:
     """Best-effort human title from an episode filename: drop the extension
     and a trailing '[...]' id tag some downloaders append, e.g. turns

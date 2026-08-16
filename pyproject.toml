@@ -17,7 +17,6 @@ keywords = ["raspberry-pi", "media-player", "retro-tv", "mpv", "nostalgia", "kid
 # tested on any machine.
 dependencies = [
     "PyYAML>=6.0",
-    "Pillow>=9.0",
 ]
 
 [project.optional-dependencies]
