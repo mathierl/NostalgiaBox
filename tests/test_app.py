@@ -336,30 +336,36 @@ def test_admin_toggle_off_by_default_mute_still_mutes(tmp_path):
     assert player.paused is False  # untouched: mute is still just mute
 
 
-def test_channel_up_down_move_grid_row_cursor(tmp_path):
-    # 3 channels (2, 3, 4) in a 2-column grid: row 0 = [2, 3], row 1 = [4].
+def test_channel_up_down_no_op_within_a_single_section(tmp_path):
+    # 3 channels (2, 3, 4), no games: the "Shows" row is the only row on
+    # screen (see TVApp._section_keys), so Channel Up/Down - which move
+    # between rows, not within one - have nothing to do.
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
     assert app._browse_number == 2
     send(app, Action.CHANNEL_DOWN)
-    assert app._browse_number == 4  # only item on row 1
-    assert app.lineup.current.number == 2  # cursor moved, playback didn't
+    assert app._browse_number == 2  # no row below the Shows row
+    assert app.lineup.current.number == 2  # cursor moved (well, didn't), playback didn't
     send(app, Action.CHANNEL_UP)
-    assert app._browse_number == 2  # back to row 0
+    assert app._browse_number == 2  # no row above it either
 
 
-def test_volume_up_down_move_grid_column_cursor(tmp_path):
+def test_volume_up_down_move_within_a_row(tmp_path):
+    # Volume Up/Down move horizontally within whichever row the cursor is
+    # on - the Shows row here holds all 3 channels, wrapping at the ends.
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.VOLUME_UP)
-    assert app._browse_number == 3  # column moved within row 0
+    assert app._browse_number == 3
     assert app.volume == 70  # real volume untouched while browsing
+    send(app, Action.VOLUME_UP)
+    assert app._browse_number == 4
     send(app, Action.VOLUME_UP)
     assert app._browse_number == 2  # wraps back
     send(app, Action.VOLUME_DOWN)
-    assert app._browse_number == 3
+    assert app._browse_number == 4
 
 
 def test_mute_on_grid_opens_episode_list_without_tuning(tmp_path):
@@ -551,10 +557,9 @@ def test_can_navigate_onto_and_into_a_game_system(tmp_path):
     app, player, _ = build_app(tmp_path, **_games_override(tmp_path))
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    # 2-col grid: row0=[2,3] row1=[4,5(SNES)]
+    # Shows row = [2, 3, 4], Games row = [5 (SNES)] - Channel Down moves
+    # between rows, landing on the first tile of the row below.
     send(app, Action.CHANNEL_DOWN)
-    assert app._browse_number == 4
-    send(app, Action.VOLUME_UP)
     assert app._browse_number == 5
     send(app, Action.MUTE)  # confirm SNES -> its game list
     assert app.admin_episode_browsing
@@ -852,9 +857,9 @@ def test_no_continue_row_when_nothing_in_progress(tmp_path):
     app.start()
     send(app, Action.ADMIN_TOGGLE)
     assert app._continue_entries == []
-    send(app, Action.CHANNEL_UP)  # no continue row - old row-wrap behaviour applies
+    send(app, Action.CHANNEL_UP)  # no continue row, and nothing above the Shows row either
     assert app._browse_continue_index is None
-    assert app._browse_number == 4  # wraps to the last row, same as before this feature
+    assert app._browse_number == 2  # unchanged - no wraparound between rows
 
 
 def test_channel_up_from_grid_top_row_enters_continue_row(tmp_path):
@@ -922,3 +927,45 @@ def test_continue_entries_recomputed_on_reopening_admin_mode(tmp_path):
     _seed_in_progress(app, ws, 2)
     send(app, Action.ADMIN_TOGGLE)  # reopen - should pick up the new state
     assert len(app._continue_entries) == 1
+
+
+# -- Netflix-style swimlane redesign (UKE-29) --------------------------------
+# The admin browse screen is a stack of independent single-row "sections" -
+# Continue Watching, Shows, Games (each only present if non-empty) - rather
+# than one flat multi-row grid. Channel Up/Down move between rows and stop
+# at the top/bottom; Volume Up/Down move within a row, wrapping at its ends;
+# moving onto a new row always lands on its first tile.
+
+
+def test_channel_down_walks_through_every_present_section(tmp_path):
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(tmp_path, watch_state=ws, **_games_override(tmp_path))
+    app.start()
+    _seed_in_progress(app, ws, 3)
+    send(app, Action.ADMIN_TOGGLE)
+    assert app._section_keys() == ["continue", "shows", "games"]
+    assert app._current_section() == "shows"  # opening always lands on the grid, not the row
+
+    send(app, Action.CHANNEL_UP)
+    assert app._current_section() == "continue"
+    send(app, Action.CHANNEL_UP)
+    assert app._current_section() == "continue"  # topmost row - nowhere further up
+
+    send(app, Action.CHANNEL_DOWN)
+    assert app._current_section() == "shows"
+    assert app._browse_number == 2  # landed on the row's first tile
+    send(app, Action.CHANNEL_DOWN)
+    assert app._current_section() == "games"
+    assert app._browse_number == 5  # SNES, the games row's first (only) tile
+    send(app, Action.CHANNEL_DOWN)
+    assert app._current_section() == "games"  # bottommost row - nowhere further down
+
+
+def test_volume_wraps_within_the_games_row(tmp_path):
+    app, player, _ = build_app(tmp_path, **_games_override(tmp_path, roms=2))
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.CHANNEL_DOWN)  # onto the (single-system) Games row
+    assert app._browse_number == 5
+    send(app, Action.VOLUME_UP)
+    assert app._browse_number == 5  # only one game system - wraps to itself

@@ -27,8 +27,9 @@ import logging
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .channel import Channel
 from .probe import DEFAULT_EPISODE_SECONDS, probe_duration
@@ -44,9 +45,15 @@ GRID_FILENAME = "show_grid.jpg"
 _GRID_W = 960
 _GRID_H = 720
 
-# Layout of the poster grid - kept in sync with the highlight-ring/label
-# positions overlay.py draws on top, via admin_grid_tile_rect() below.
-GRID_COLS = 2
+# Layout of the poster grid - kept in sync with the section-label/highlight-
+# ring positions overlay.py draws on top, via admin_section_layout() below.
+# Real channels and game systems are grouped into named "Shows"/"Games"
+# swimlanes (UKE-29) - each its own single horizontal row, sized to fit
+# however many tiles it holds (no scrolling/pagination - the same tradeoff
+# the single flat grid this replaces already made). This is safe to bake
+# into the once-per---check background image, unlike the Continue Watching
+# row (see overlay.py): which shows/games exist only changes when the
+# config does, not on every watch.
 _GRID_MARGIN_X = 56
 # Reserves room for the "Select a channel" header line *and*, below it, the
 # "Continue Watching" text row overlay.py draws (see CONTINUE_LIMIT there).
@@ -57,12 +64,36 @@ _GRID_MARGIN_X = 56
 # it to position the continue-watching text at the same header height.
 GRID_HEADER_H = 188
 _GRID_FOOTER_H = 56
-_GRID_GAP = 28
-_GRID_LABEL_H = 60
+_SECTION_LABEL_H = 22
+_SECTION_LABEL_GAP = 8
+_SECTION_ROW_GAP = 12
+_GRID_LABEL_H = 58  # room below each tile for its title/subtitle text
+_TILE_GAP = 24
+_TILE_MAX_W = 240
 _POSTER_ASPECT = 16 / 9
 
 _BG_COLOR = (0x14, 0x14, 0x14)
 _PLACEHOLDER_COLOR = (0x2A, 0x2A, 0x2A)
+
+
+@dataclass(frozen=True)
+class SectionTile:
+    """One poster's pixel rect within a section's row."""
+
+    channel: Channel
+    x: int
+    y: int
+    w: int
+    h: int
+
+
+@dataclass(frozen=True)
+class Section:
+    """One named swimlane ("Shows", "Games") and its laid-out tiles."""
+
+    title: str
+    label_y: int
+    tiles: List[SectionTile] = field(default_factory=list)
 
 
 def ffmpeg_available() -> bool:
@@ -82,24 +113,53 @@ def _slugify(name: str) -> str:
     return slug or "show"
 
 
-def admin_grid_tile_rect(index: int, count: int) -> tuple[int, int, int, int]:
-    """Pixel rect ``(x, y, w, h)`` for poster ``index`` of ``count``, in the
-    same local (0,0)-(960,720) coordinate space the composed grid image is
-    drawn in. Also used by overlay.py to line up the highlight ring/labels.
+def admin_sections(tiles: Sequence[Channel]) -> List[Tuple[str, List[Channel]]]:
+    """Split combined admin tiles (real channels + game systems, in
+    :meth:`nostalgiabox.app.TVApp._admin_tiles` order) into the named
+    swimlanes the admin browse screen groups them into - "Shows" then
+    "Games", each only present if it actually has anything in it. A
+    channel's ``config.kind`` is the only thing that decides which lane
+    it's in.
     """
-    cols = GRID_COLS if count > 1 else 1
-    rows = max(1, -(-count // cols))  # ceil division
-    col_w = (_GRID_W - _GRID_MARGIN_X * 2 - _GRID_GAP * (cols - 1)) // cols
-    tile_h = int(col_w / _POSTER_ASPECT)
-    available_h = _GRID_H - GRID_HEADER_H - _GRID_FOOTER_H
-    row_pitch = tile_h + _GRID_LABEL_H + _GRID_GAP
-    block_h = rows * row_pitch - _GRID_GAP
-    start_y = GRID_HEADER_H + max(0, (available_h - block_h) // 2)
+    shows = [c for c in tiles if c.config.kind != "game"]
+    games = [c for c in tiles if c.config.kind == "game"]
+    sections: List[Tuple[str, List[Channel]]] = []
+    if shows:
+        sections.append(("Shows", shows))
+    if games:
+        sections.append(("Games", games))
+    return sections
 
-    row, col = divmod(index, cols)
-    x = _GRID_MARGIN_X + col * (col_w + _GRID_GAP)
-    y = start_y + row * row_pitch
-    return x, y, col_w, tile_h
+
+def admin_section_layout(tiles: Sequence[Channel]) -> List[Section]:
+    """Pixel layout - in the same local (0,0)-(960,720) coordinate space the
+    composed grid image is drawn in - for every section's label and tiles.
+    The one shared source of truth between the background image
+    (:func:`compose_show_grid`) and overlay.py's section-label/highlight-
+    ring drawing, so they can never drift apart.
+
+    Each section is one horizontal row, tiles sized to fit however many it
+    holds (capped at ``_TILE_MAX_W`` so a lone show/system doesn't get a
+    giant poster) - no scrolling or pagination, the same tradeoff the
+    single flat grid this replaces already made.
+    """
+    usable_w = _GRID_W - _GRID_MARGIN_X * 2
+    y = GRID_HEADER_H
+    sections: List[Section] = []
+    for title, channels in admin_sections(tiles):
+        label_y = y
+        row_y = label_y + _SECTION_LABEL_H + _SECTION_LABEL_GAP
+        count = len(channels)
+        tile_w = min(_TILE_MAX_W, (usable_w - _TILE_GAP * (count - 1)) // count)
+        tile_h = int(tile_w / _POSTER_ASPECT)
+        x = _GRID_MARGIN_X
+        section_tiles: List[SectionTile] = []
+        for channel in channels:
+            section_tiles.append(SectionTile(channel=channel, x=x, y=row_y, w=tile_w, h=tile_h))
+            x += tile_w + _TILE_GAP
+        sections.append(Section(title=title, label_y=label_y, tiles=section_tiles))
+        y = row_y + tile_h + _GRID_LABEL_H + _SECTION_ROW_GAP
+    return sections
 
 
 def _run(cmd: List[str]) -> None:
@@ -192,30 +252,29 @@ def compose_show_grid(
     """Render the full show-grid background image: dark backdrop plus every
     channel's poster (or a plain placeholder tile if it has none - this is
     what every game-system tile gets, since a ROM has no frame to grab),
-    positioned via :func:`admin_grid_tile_rect` so overlay.py's highlight
-    ring and text line up with it exactly. ``tiles`` is real channels and
-    game systems combined, in the order they should appear in the grid.
+    positioned via :func:`admin_section_layout` so overlay.py's section
+    labels and highlight ring line up with it exactly. ``tiles`` is real
+    channels and game systems combined, in the order they should appear.
     """
     if not pillow_available():
         log.warning("Pillow not available; cannot compose the admin show grid")
         return None
     from PIL import Image
 
-    channels = list(tiles)
     bg = Image.new("RGB", (_GRID_W, _GRID_H), _BG_COLOR)
-    for i, channel in enumerate(channels):
-        x, y, w, h = admin_grid_tile_rect(i, len(channels))
-        poster_path = posters.get(channel.number)
-        tile = None
-        if poster_path is not None and poster_path.exists():
-            try:
-                with Image.open(poster_path) as src:
-                    tile = _cover_resize(src.convert("RGB"), w, h)
-            except OSError:
-                tile = None
-        if tile is None:
-            tile = Image.new("RGB", (w, h), _PLACEHOLDER_COLOR)
-        bg.paste(tile, (x, y))
+    for section in admin_section_layout(list(tiles)):
+        for tile in section.tiles:
+            poster_path = posters.get(tile.channel.number)
+            img = None
+            if poster_path is not None and poster_path.exists():
+                try:
+                    with Image.open(poster_path) as src:
+                        img = _cover_resize(src.convert("RGB"), tile.w, tile.h)
+                except OSError:
+                    img = None
+            if img is None:
+                img = Image.new("RGB", (tile.w, tile.h), _PLACEHOLDER_COLOR)
+            bg.paste(img, (tile.x, tile.y))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     bg.save(out_path, quality=88)
@@ -239,11 +298,13 @@ def generate_admin_assets(
 __all__ = [
     "THUMBS_SUBDIR",
     "GRID_FILENAME",
-    "GRID_COLS",
     "GRID_HEADER_H",
+    "Section",
+    "SectionTile",
     "ffmpeg_available",
     "pillow_available",
-    "admin_grid_tile_rect",
+    "admin_sections",
+    "admin_section_layout",
     "extract_poster",
     "ensure_channel_poster",
     "ensure_all_posters",

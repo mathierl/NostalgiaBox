@@ -598,57 +598,90 @@ class TVApp:
         else:
             log.info("admin show-grid image not found (run `nostalgiabox --check`)")
 
-    def _move_browse_cursor(self, *, drow: int = 0, dcol: int = 0) -> None:
-        """Move the browse cursor, which lives in one of two places: the
-        Continue Watching row (self._browse_continue_index set), or the
-        channel/game grid below it (self._browse_number). The row sits
-        above row 0 of the grid - Channel Up from the grid's top row moves
-        onto it (if it has anything in it), Channel Down from it moves back
-        onto the grid; there's no further wraparound past it, unlike the
-        grid's own row wraparound (see below) which is unaffected by any
-        of this when there's nothing to continue.
+    def _section_tiles(self, key: str) -> List[Channel]:
+        """The channels/game systems in one named browse row. 'continue'
+        isn't a real Channel list (see self._continue_entries instead) -
+        callers asking for it get nothing back on purpose.
         """
-        from .thumbnails import GRID_COLS
+        if key == "shows":
+            return [c for c in self.lineup]
+        if key == "games":
+            return list(self.games)
+        return []
 
-        numbers = [c.number for c in self._admin_tiles()]
-        n_continue = len(self._continue_entries)
+    def _section_keys(self) -> List[str]:
+        """Every browse row currently on screen, top to bottom: Continue
+        Watching (only if it has anything in it), then Shows, then Games -
+        each only present if it isn't empty. This is recomputed on every
+        move rather than cached, since it's cheap and always needs to
+        reflect self._continue_entries's current contents anyway.
+        """
+        keys = []
+        if self._continue_entries:
+            keys.append("continue")
+        if self._section_tiles("shows"):
+            keys.append("shows")
+        if self._section_tiles("games"):
+            keys.append("games")
+        return keys
 
+    def _current_section(self) -> str:
         if self._browse_continue_index is not None:
-            if dcol:
-                self._browse_continue_index = (self._browse_continue_index + dcol) % n_continue
-            elif drow > 0:
-                self._browse_continue_index = None
+            return "continue"
+        channel = self._channel_by_number(self._browse_number)
+        if channel is not None and channel.config.kind == "game":
+            return "games"
+        return "shows"
+
+    def _enter_section(self, key: str) -> None:
+        """Land the cursor on a row's first tile - used when moving between
+        rows (see _move_browse_cursor). Simpler than trying to preserve a
+        horizontal position across rows of different lengths, and matches
+        landing on the leftmost card the way most on-screen row UIs do.
+        """
+        if key == "continue":
+            self._browse_continue_index = 0
+            return
+        self._browse_continue_index = None
+        tiles = self._section_tiles(key)
+        if tiles:
+            self._browse_number = tiles[0].number
+
+    def _move_browse_cursor(self, *, drow: int = 0, dcol: int = 0) -> None:
+        """Move the browse cursor. The screen is a stack of independent
+        single-row "swimlanes" - Continue Watching, Shows, Games (each only
+        present if it has anything in it; see _section_keys) - rather than
+        the old flat multi-row grid. Channel Up/Down move between rows and
+        stop at the top/bottom (no wraparound between rows); Volume Up/Down
+        move within whichever row the cursor is on, wrapping at its ends.
+        """
+        sections = self._section_keys()
+        if not sections:
+            return
+        current_key = self._current_section()
+        if current_key not in sections:
+            current_key = sections[0]
+            self._enter_section(current_key)
+
+        if dcol:
+            if current_key == "continue":
+                n = len(self._continue_entries)
+                if n:
+                    self._browse_continue_index = (self._browse_continue_index + dcol) % n
+            else:
+                numbers = [c.number for c in self._section_tiles(current_key)]
                 if numbers:
-                    self._browse_number = numbers[0]
-            # drow < 0: already the topmost row - nothing to do.
+                    pos = numbers.index(self._browse_number) if self._browse_number in numbers else 0
+                    self._browse_number = numbers[(pos + dcol) % len(numbers)]
             self._refresh_admin_panel()
             return
 
-        if not numbers:
-            return
-        cols = GRID_COLS if len(numbers) > 1 else 1
-        rows = (len(numbers) + cols - 1) // cols
-        idx = numbers.index(self._browse_number) if self._browse_number in numbers else 0
-        row, col = divmod(idx, cols)
-
-        if dcol:
-            row_start = row * cols
-            row_len = min(cols, len(numbers) - row_start)
-            col = (idx - row_start + dcol) % row_len
-            idx = row_start + col
-        elif drow:
-            if drow < 0 and row == 0 and n_continue:
-                self._browse_continue_index = min(col, n_continue - 1)
-                self._refresh_admin_panel()
-                return
-            row = (row + drow) % rows
-            row_start = row * cols
-            row_len = min(cols, len(numbers) - row_start)
-            col = min(col, row_len - 1)
-            idx = row_start + col
-
-        self._browse_number = numbers[idx]
-        self._refresh_admin_panel()
+        if drow:
+            idx = sections.index(current_key)
+            new_idx = idx + drow
+            if 0 <= new_idx < len(sections):
+                self._enter_section(sections[new_idx])
+            self._refresh_admin_panel()
 
     def _confirm_show_selection(self) -> None:
         self.admin_browsing = False

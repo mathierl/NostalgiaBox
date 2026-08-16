@@ -383,6 +383,26 @@ def test_admin_browser_shows_game_systems_alongside_channels(tmp_path):
     assert "SNES" in ass
     assert "3 games" in ass    # game systems count in "games", not "eps"
     assert "2 eps" in ass      # real channels are unaffected
+    assert "Shows" in ass and "Games" in ass  # section swimlane labels
+
+
+def test_admin_browser_omits_games_section_label_when_there_are_no_games(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "a", 2)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 3, "name": "Arthur", "path": str(tmp_path / "a")}],
+        }
+    )
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_browser(lineup, highlight_number=3)
+    ass = player.overlays[5]
+    assert "Shows" in ass
+    assert "Games" not in ass
 
 
 def test_admin_episode_list_says_select_a_game_for_game_channels(tmp_path):

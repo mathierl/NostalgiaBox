@@ -22,7 +22,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 from .channel import Channel, ChannelLineup, episode_title
 from .config import Config, UiConfig
 from .player import Player
-from .thumbnails import admin_grid_tile_rect
+from .thumbnails import admin_section_layout
 from .watch_state import ContinueEntry
 
 # Virtual canvas the overlays are laid out on. This maps to the WHOLE display
@@ -338,11 +338,12 @@ def _admin_browser_ass(
     continue_entries: "Sequence[ContinueEntry]" = (),
     continue_index: Optional[int] = None,
 ) -> str:
-    """Header, per-tile title/count labels (positioned to sit right under
-    each poster - see :func:`nostalgiabox.thumbnails.admin_grid_tile_rect`
-    - a highlight ring around the selected one, and a footer hint. The
-    posters themselves are the background image this draws on top of, not
-    drawn here. ``tiles`` is real channels and game systems combined.
+    """Header, per-section "Shows"/"Games" swimlane labels, per-tile title/
+    count labels (positioned to sit right under each poster - see
+    :func:`nostalgiabox.thumbnails.admin_section_layout` - a highlight ring
+    around the selected one, and a footer hint. The posters themselves are
+    the background image this draws on top of, not drawn here. ``tiles`` is
+    real channels and game systems combined.
 
     ``continue_entries`` draws the "Continue Watching" row above the header
     (see the constants just above); when ``continue_index`` is set, that's
@@ -381,18 +382,33 @@ def _admin_browser_ass(
             )
 
     parts.append(rf"{{\an7\pos({_IX0},{_IY0}){_admin_style(size=34)}}}{_escape(header)}")
-    for i, channel in enumerate(channels):
-        lx, ly, w, h = admin_grid_tile_rect(i, len(channels))
-        x, y = _FRAME_X0 + lx, ly
-        selected = continue_index is None and channel.number == highlight_number
-        if selected:
-            parts.append(_outline_rect(x=x - 4, y=y - 4, w=w + 8, h=h + 8, color=_ADMIN_WHITE, thickness=3))
-        count = len(channel.episodes)
-        subtitle = f"{count} {_item_label(channel, count)}"
-        title = f"CH {channel.number:02d}  {channel.name}"
-        title_color = _ADMIN_WHITE if selected else _ADMIN_DIM
-        parts.append(rf"{{\an7\pos({x},{y + h + 8}){_admin_style(size=22, color=title_color)}}}{_escape(title)}")
-        parts.append(rf"{{\an7\pos({x},{y + h + 34}){_admin_style(size=18, color=_ADMIN_MUTED, bold=False)}}}{_escape(subtitle)}")
+    for section in admin_section_layout(channels):
+        if not section.tiles:
+            continue
+        label_x = _FRAME_X0 + section.tiles[0].x
+        parts.append(
+            rf"{{\an7\pos({label_x},{section.label_y}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}"
+            f"{_escape(section.title)}"
+        )
+        for tile in section.tiles:
+            channel = tile.channel
+            x, y = _FRAME_X0 + tile.x, tile.y
+            selected = continue_index is None and channel.number == highlight_number
+            if selected:
+                parts.append(
+                    _outline_rect(x=x - 4, y=y - 4, w=tile.w + 8, h=tile.h + 8, color=_ADMIN_WHITE, thickness=3)
+                )
+            count = len(channel.episodes)
+            subtitle = f"{count} {_item_label(channel, count)}"
+            title = f"CH {channel.number:02d}  {channel.name}"
+            title_color = _ADMIN_WHITE if selected else _ADMIN_DIM
+            parts.append(
+                rf"{{\an7\pos({x},{y + tile.h + 8}){_admin_style(size=22, color=title_color)}}}{_escape(title)}"
+            )
+            parts.append(
+                rf"{{\an7\pos({x},{y + tile.h + 34}){_admin_style(size=18, color=_ADMIN_MUTED, bold=False)}}}"
+                f"{_escape(subtitle)}"
+            )
     parts.append(rf"{{\an2\pos({_FRAME_CX},{_IY1}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}{_escape(footer)}")
     return "\n".join(parts)
 
