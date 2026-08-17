@@ -39,8 +39,17 @@ class Player(ABC):
         """Begin playing ``path`` from ``start`` seconds in."""
 
     @abstractmethod
-    def play_loop(self, path: Path) -> None:
-        """Play ``path`` on an endless loop (used for the static/no-signal clip)."""
+    def play_loop(self, path: Path, *, use_frame_filter: bool = True) -> None:
+        """Play ``path`` on an endless loop (used for the static/no-signal clip,
+        and the admin-mode poster-grid background image).
+
+        ``use_frame_filter=False`` (UKE-29) bypasses the 4:3 pillarbox filter
+        (see ``force_4_3`` on :class:`MpvPlayer`) for just this one file -
+        used only for the admin-mode background image, which is composed at
+        the full 16:9 canvas size and meant to fill the whole screen (a
+        modern Netflix-ish UI, not a nostalgic 4:3 "tube"), unlike every
+        actual show/filler clip, which always stays pillarboxed.
+        """
 
     def play_transition(
         self,
@@ -93,6 +102,15 @@ class Player(ABC):
         seconds within the current item (used by the admin view only - see
         TVApp._seek). The default implementation is a no-op; players that
         can actually seek (see :class:`MpvPlayer`) override it.
+        """
+
+    def set_subtitle_visible(self, visible: bool) -> None:
+        """Show or hide whatever subtitle track is currently selected (used
+        by Adult Mode's Info-button toggle - see TVApp._toggle_subtitles).
+        Never changes *which* track is selected, only whether it's drawn -
+        mpv's own automatic track selection (``sid=auto``) picks the track;
+        if a file has none, this is harmlessly a no-op. The default
+        implementation does nothing; :class:`MpvPlayer` overrides it.
         """
 
     @abstractmethod
@@ -211,6 +229,9 @@ class MpvPlayer(Player):
 
         self._mpv = mpv.MPV(**options)
         self._closed = False
+        # Remembered so play_loop(use_frame_filter=False) knows whether
+        # there's actually a pillarbox filter active to bypass (UKE-29).
+        self._force_4_3 = bool(force_4_3)
         # True while a looping filler clip (static / colour bars) is showing, so
         # its (non-)ending never advances the channel.
         self._suppress = True
@@ -254,11 +275,17 @@ class MpvPlayer(Player):
             if self.on_end is not None:
                 self.on_end(END_ERROR)
 
-    def play_loop(self, path: Path) -> None:
+    def play_loop(self, path: Path, *, use_frame_filter: bool = True) -> None:
         self._suppress = True  # a looping clip should never trigger "next"
         try:
             self._mpv.loop_file = "inf"
-            self._mpv.loadfile(str(path), "replace")
+            if not use_frame_filter and self._force_4_3:
+                # File-local property override (mpv's loadfile options list):
+                # clears the global 4:3 pad/scale filter for just this one
+                # file - see the Player.play_loop docstring for why.
+                self._mpv.loadfile(str(path), "replace", vf="")
+            else:
+                self._mpv.loadfile(str(path), "replace")
             self._mpv.pause = False
         except Exception:  # noqa: BLE001
             log.exception("failed to loop %s", path)
@@ -348,6 +375,12 @@ class MpvPlayer(Player):
         except Exception:  # noqa: BLE001
             log.debug("seek failed", exc_info=True)
 
+    def set_subtitle_visible(self, visible: bool) -> None:
+        try:
+            self._mpv.sub_visibility = bool(visible)
+        except Exception:  # noqa: BLE001
+            log.debug("could not set subtitle visibility", exc_info=True)
+
     def get_time_pos(self) -> Optional[float]:
         try:
             pos = self._mpv.time_pos
@@ -409,6 +442,11 @@ class MockPlayer(Player):
         self.messages: List[Tuple[str, float]] = []
         self.overlays: dict[int, str] = {}
         self.stops = 0
+        # Which loop-played path (if any) was asked to bypass the 4:3
+        # pillarbox filter (UKE-29) - handy for asserting the admin-grid
+        # background image requests full-width rendering.
+        self.loop_frame_filter: dict[Path, bool] = {}
+        self.subtitles_visible: Optional[bool] = None
 
     def _log(self, msg: str) -> None:
         if self.verbose:
@@ -421,10 +459,11 @@ class MockPlayer(Player):
         self.played.append((path, start))
         self._log(f"PLAY {path} @ {start:.1f}s")
 
-    def play_loop(self, path: Path) -> None:
+    def play_loop(self, path: Path, *, use_frame_filter: bool = True) -> None:
         self.looping = path
         self.current = path
-        self._log(f"LOOP {path}")
+        self.loop_frame_filter[path] = use_frame_filter
+        self._log(f"LOOP {path} (frame_filter={use_frame_filter})")
 
     def play_transition(
         self,
@@ -485,6 +524,10 @@ class MockPlayer(Player):
 
     def get_time_pos(self) -> Optional[float]:
         return self.time_pos if self.current is not None else None
+
+    def set_subtitle_visible(self, visible: bool) -> None:
+        self.subtitles_visible = bool(visible)
+        self._log(f"SUBTITLES {self.subtitles_visible}")
 
     def show_text(self, text: str, duration: float) -> None:
         self.messages.append((text, duration))

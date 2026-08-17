@@ -124,67 +124,24 @@ def test_overlay_uses_configured_font_and_color(tmp_path):
     assert "&H005AFF4D" in ass         # #4DFF5A -> ASS BBGGRR
 
 
-def test_admin_panel_lists_channels_and_episode_counts(tmp_path):
-    from nostalgiabox.channel import build_lineup
-
-    make_show(tmp_path, "a", 1)
-    make_show(tmp_path, "b", 3)
-    config = config_from_dict(
-        {
-            "shuffle_seed": 1,
-            "channels": [
-                {"number": 3, "name": "Arthur", "path": str(tmp_path / "a")},
-                {"number": 4, "name": "Bugs", "path": str(tmp_path / "b")},
-            ],
-        }
-    )
-    lineup = build_lineup(config)
-    player = MockPlayer()
-    om = OverlayManager(player, config, clock=FakeClock())
-    om.show_admin_panel(lineup, paused=False)
-    ass = player.overlays[5]
-    assert "Arthur" in ass and "Bugs" in ass
-    assert "(1 ep)" in ass  # channel "a" has 1 episode (singular)
-    assert "(3 eps)" in ass  # channel "b" has 3 episodes
-
-
-def test_admin_panel_shows_paused_state(tmp_path):
-    from nostalgiabox.channel import build_lineup
-
-    config = _config(tmp_path)
-    lineup = build_lineup(config)
-    player = MockPlayer()
-    om = OverlayManager(player, config, clock=FakeClock())
-    om.show_admin_panel(lineup, paused=True)
-    assert "PAUSED" in player.overlays[5]
-
-
-def test_admin_panel_persists_and_clears(tmp_path):
-    from nostalgiabox.channel import build_lineup
-
-    config = _config(tmp_path)
-    lineup = build_lineup(config)
-    player = MockPlayer()
+def test_adult_mode_status_is_a_transient_message_not_a_persistent_overlay(tmp_path):
+    # UKE-29: the old always-on-screen corner panel (every channel +
+    # PAUSED/ADMIN, glued to the picture until admin mode was fully exited)
+    # was reported as a bug - Adult Mode's on/off feedback is deliberately
+    # just a brief message, sharing the same overlay slot/expiry as every
+    # other OSD message (seek, volume, "no signal", ...), not a new
+    # persistent one.
     clock = FakeClock()
-    om = OverlayManager(player, config, clock=clock)
-    om.show_admin_panel(lineup, paused=False)
+    player = MockPlayer()
+    om = OverlayManager(player, _config(tmp_path), clock=clock)
+    om.show_adult_mode_status(on=True)
+    assert "Adult Mode" in player.overlays[4] and "ON" in player.overlays[4]
     clock.advance(10_000)
     om.tick()
-    assert 5 in player.overlays  # persistent, no expiry
-    om.clear_admin_panel()
-    assert 5 not in player.overlays
+    assert 4 not in player.overlays  # expires like any other message
 
-
-def test_clear_all_also_clears_admin_panel(tmp_path):
-    from nostalgiabox.channel import build_lineup
-
-    config = _config(tmp_path)
-    lineup = build_lineup(config)
-    player = MockPlayer()
-    om = OverlayManager(player, config, clock=FakeClock())
-    om.show_admin_panel(lineup, paused=False)
-    om.clear_all()
-    assert 5 not in player.overlays
+    om.show_adult_mode_status(on=False)
+    assert "OFF" in player.overlays[4]
 
 
 def test_admin_browser_highlights_selected_channel(tmp_path):
@@ -269,21 +226,6 @@ def test_admin_browser_without_continue_entries_omits_the_row(tmp_path):
     assert ass.count("\\3c") == 1
 
 
-def test_admin_browser_and_panel_share_overlay_slot(tmp_path):
-    from nostalgiabox.channel import build_lineup
-
-    config = _config(tmp_path)
-    lineup = build_lineup(config)
-    player = MockPlayer()
-    om = OverlayManager(player, config, clock=FakeClock())
-    om.show_admin_browser(lineup, highlight_number=3)
-    assert "Select a channel" in player.overlays[5]
-    om.show_admin_panel(lineup, paused=False)
-    assert "Select a channel" not in player.overlays[5]  # replaced, not stacked
-    om.clear_admin_panel()
-    assert 5 not in player.overlays
-
-
 def test_admin_browser_draws_evergreen_insights_row(tmp_path):
     from nostalgiabox.channel import build_lineup
 
@@ -309,6 +251,66 @@ def test_admin_browser_draws_evergreen_insights_row(tmp_path):
     ass = player.overlays[5]
     assert "Watch Insights" in ass
     assert ass.count("\\3c") == 1
+
+
+def test_admin_browser_draws_evergreen_adult_mode_row(tmp_path):
+    # UKE-29: the second evergreen row, right below Insights - reflects
+    # on/off state via its label text, and highlights independently.
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "a", 2)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 3, "name": "Arthur", "path": str(tmp_path / "a")}],
+        }
+    )
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+
+    om.show_admin_browser(lineup, highlight_number=3, adult_mode=False)
+    ass = player.overlays[5]
+    assert "Adult Mode: OFF" in ass
+
+    om.show_admin_browser(lineup, highlight_number=3, adult_mode=True, adult_toggle_selected=True)
+    ass = player.overlays[5]
+    assert "Adult Mode: ON" in ass
+    # the toggle row is selected, so the grid tile must not also be
+    # highlighted - only one outline ring total.
+    assert ass.count("\\3c") == 1
+
+
+def test_admin_browser_and_episode_list_backdrops_span_the_full_canvas_width(tmp_path):
+    # UKE-29 real-hardware feedback: the admin UI used to be confined to the
+    # 960px-wide 4:3 "tube" every actual show plays in, wasting a quarter of
+    # a widescreen TV. It's now full-width, matching the whole 1280-wide
+    # canvas - the grid's tiles/labels and the episode-list/Insights opaque
+    # backdrop should both reach edge to edge, not stop at the old 4:3 inset.
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "a", 2)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 3, "name": "Arthur", "path": str(tmp_path / "a")}],
+        }
+    )
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+
+    om.show_admin_browser(lineup, highlight_number=3)
+    xs = _all_x_positions(player.overlays[5])
+    # positions comfortably beyond the old 960-wide frame's right edge (1120)
+    assert any(x > _FRAME_X1 for x in xs)
+
+    channel = next(c for c in lineup if c.number == 3)
+    om.show_admin_episode_list(channel, highlight_index=0)
+    ass = player.overlays[5]
+    # the backdrop rectangle is drawn "m 0 0 l <w> 0 ..." at x=0 - a plain
+    # rectangle spanning the full 1280 width, not the old 960-wide inset.
+    assert "l 1280 0" in ass
 
 
 def test_admin_episode_list_highlights_selected_episode(tmp_path):
@@ -378,6 +380,85 @@ def test_admin_episode_list_scrolls_to_keep_selection_visible(tmp_path):
     # Sanity: the window never shows more rows than fit on screen.
     row_lines = [ln for ln in ass.split("\n") if ln.split("}")[-1][:1].isdigit()]
     assert len(row_lines) <= _EPISODE_VISIBLE_ROWS
+
+
+def test_admin_episode_list_shows_watched_and_in_progress_markers(tmp_path):
+    # UKE-29 regression: per-episode watched/in-progress state used to be
+    # visible in the episode list (via the browser-era UI) and went missing
+    # in the mpv+ASS revert - restored here via an optional watch_state arg.
+    from nostalgiabox.channel import build_lineup
+    from nostalgiabox.watch_state import WatchState
+
+    make_show(tmp_path, "b", 3)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 4, "name": "Bugs", "path": str(tmp_path / "b")}],
+        }
+    )
+    lineup = build_lineup(config)
+    channel = next(c for c in lineup if c.number == 4)
+    ws = WatchState(tmp_path / "watch_state.json")
+    ws.mark_episode_watched(4, channel.config.path, channel.episodes[0])
+    ws.record_episode_position(4, channel.config.path, channel.episodes[1], position=60.0, duration=600.0)
+
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_episode_list(channel, highlight_index=0, watch_state=ws)
+    ass = player.overlays[5]
+    assert "Watched" in ass  # episode 1
+    assert "10% watched" in ass  # episode 2: 60/600
+
+
+def test_admin_episode_list_with_no_watch_state_shows_no_markers(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "b", 2)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 4, "name": "Bugs", "path": str(tmp_path / "b")}],
+        }
+    )
+    lineup = build_lineup(config)
+    channel = next(c for c in lineup if c.number == 4)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_episode_list(channel, highlight_index=0)  # no watch_state
+    ass = player.overlays[5]
+    assert "Watched" not in ass and "% watched" not in ass
+
+
+def test_admin_browser_scroll_y_shifts_tiles_but_not_the_header(tmp_path):
+    # UKE-29: the header/Continue Watching row are pinned; everything below
+    # (section labels, tiles, the evergreen rows) shifts up by scroll_y.
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "a", 2)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 3, "name": "Arthur", "path": str(tmp_path / "a")}],
+        }
+    )
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+
+    om.show_admin_browser(lineup, highlight_number=3, scroll_y=0)
+    unscrolled_ys = _all_y_positions(player.overlays[5])
+    header_y = min(unscrolled_ys)  # "Select a channel" - always the topmost line
+
+    om.show_admin_browser(lineup, highlight_number=3, scroll_y=50)
+    scrolled_ys = _all_y_positions(player.overlays[5])
+    assert min(scrolled_ys) == header_y  # header unmoved
+    assert "CH 03  Arthur" in player.overlays[5]  # tile label still drawn (just shifted)
+
+
+def _all_y_positions(ass: str):
+    import re as _re
+
+    return [int(m) for m in _re.findall(r"\\pos\(\d+,(-?\d+)\)", ass)]
 
 
 def _config_with_games(tmp_path, *, snes_roms=3, arthur_eps=2):

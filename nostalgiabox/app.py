@@ -25,6 +25,40 @@ display, no race condition. The only remaining display handoff is launching
 a game via RetroArch (see _launch_game), which does have to close mpv - that
 one was validated safe on real hardware independently (see
 scripts/spike_mpv_retroarch_handoff.py, UKE-28).
+
+Further real-hardware feedback (still UKE-29) led to a second pass on admin
+mode itself - three distinct states rather than one overloaded flag:
+
+* **Kid Mode** - the default. The remote behaves exactly as it always has;
+  nothing admin-related is ever drawn.
+* **Admin Mode** (``admin_browsing``/``admin_episode_browsing``/
+  ``admin_insights_viewing`` - ``admin_mode`` is just "is any of these
+  true?", see the property below) - the full-screen grid/episode-list/
+  Insights browse screens, reached by holding Power as before. Purely
+  modal: closing it (by picking something, or backing all the way out)
+  leaves nothing on screen.
+* **Adult Mode** (``adult_mode``) - a new *sticky* flag, flipped from a
+  toggle row inside the grid (alongside Insights - see ``_confirm_adult_
+  toggle``), that survives closing the grid and channel changes until
+  turned off again (or standby). While it's on and nothing's being
+  browsed, Mute/Channel-Up-Down/Info are repurposed into pause/seek/
+  subtitle-toggle - a grown-up-only control surface the kid remote never
+  exposes - but *unlike* the flag this replaced, nothing is left glued to
+  the screen: no persistent corner panel, just the same brief OSD messages
+  every other action already uses. Back/Last-Channel, repurposed the same
+  way, reopens the grid straight into the current show's episode list for
+  a quick episode switch (see ``_jump_last_channel``). Adult Mode is only
+  ever turned off from its own toggle row inside the grid (or reset
+  outright by standby, the kid-proof reset point - see _toggle_standby) -
+  long-press Power (``ADMIN_TOGGLE``) still just opens/closes the grid
+  itself, exactly as before.
+
+The browse grid can also now be taller than one screen (posters keep a
+fixed comfortable size and wrap onto more rows instead of shrinking - see
+``nostalgiabox.thumbnails.admin_section_layout``) and scrolls vertically as
+the cursor moves between rows (``_scroll_y`` / ``_sync_admin_scroll``),
+cropping a screen's worth out of the pre-composed image live (see
+``nostalgiabox.thumbnails.crop_viewport`` - cheap, no ffmpeg/poster work).
 """
 
 from __future__ import annotations
@@ -150,12 +184,16 @@ class TVApp:
         # Runtime state.
         self.volume = config.initial_volume
         self.muted = False
+        # Subtitle visibility (UKE-29): toggled via Info while watching under
+        # Adult Mode (see _toggle_subtitles) - starts at whatever config says.
+        self.subtitles_visible = config.subtitles_default
         self.standby = False
         self.powered_off = False
         # Admin/developer view: hidden behind a long power-button hold (see
-        # input/keyboard.py). Grown-ups get an overview of every channel and
-        # pause/play; the kid-facing remote is unaffected either way.
-        self.admin_mode = False
+        # input/keyboard.py). See the module docstring for the full Kid /
+        # Admin / Adult three-mode picture (UKE-29) - admin_mode itself is
+        # now a derived property (below), not real state, so it can never
+        # drift out of sync with the three browse-screen flags it reflects.
         self.paused = False
         # Admin mode has three nested browse screens. admin_browsing = True is
         # the top-level "select a channel" poster grid: Channel Up/Down move a
@@ -177,6 +215,16 @@ class TVApp:
         # role _browse_continue_index plays for that row.
         self.admin_insights_viewing = False
         self._browse_on_insights = False
+        # Adult Mode (UKE-29, see module docstring): sticky, independent of
+        # whether the grid is currently open. Flipped via the evergreen
+        # toggle row right below Insights - _browse_on_adult_toggle is that
+        # row's "cursor is on it" marker, same idea as _browse_on_insights.
+        self.adult_mode = False
+        self._browse_on_adult_toggle = False
+        # How far the grid has scrolled (UKE-29) - see _sync_admin_scroll,
+        # called any time the cursor moves to a row that might not already
+        # be on screen. Reset to 0 whenever the grid is (re)opened.
+        self._scroll_y: int = 0
         self._browse_number: Optional[int] = None
         self._browse_episode_number: Optional[int] = None
         self._browse_episode_index: int = 0
@@ -220,6 +268,17 @@ class TVApp:
         self._colorbars_path = self._resolve_asset(COLORBARS_FILENAME)
         # The channel-change transition clip depends on the configured effect.
         self._transition_path = self._resolve_transition_asset()
+
+    @property
+    def admin_mode(self) -> bool:
+        """True whenever one of the three browse screens (grid/episode-list/
+        Insights) is open - derived, not stored, so it can never disagree
+        with them (UKE-29; see the module docstring for the full Kid/Admin/
+        Adult picture). Read-only from outside; flip the individual
+        ``admin_browsing``/``admin_episode_browsing``/``admin_insights_
+        viewing`` flags (via ``_toggle_admin_mode`` and friends) instead.
+        """
+        return self.admin_browsing or self.admin_episode_browsing or self.admin_insights_viewing
 
     # -- construction -------------------------------------------------------
     @classmethod
@@ -279,6 +338,7 @@ class TVApp:
         """Power on: set volume, start input, and tune to the first channel."""
         self.player.set_volume(self.volume)
         self.player.set_mute(self.muted)
+        self.player.set_subtitle_visible(self.subtitles_visible)
         self.input.start()
         self._select_start_channel()
         self.tune_current(show_static=False)
@@ -382,11 +442,13 @@ class TVApp:
         if self.admin_insights_viewing:
             # Read-only screen - nothing to move/change.
             return
-        if self.admin_mode:
-            # Once something's actually playing in admin mode (the small
-            # corner panel, not a browse screen), Channel Up/Down are
-            # repurposed into seek - a grown-up-only control, same spirit as
-            # Mute becoming pause/play here.
+        if self.adult_mode:
+            # Once something's actually playing under Adult Mode (not a
+            # browse screen), Channel Up/Down are repurposed into seek - a
+            # grown-up-only control, same spirit as Mute becoming pause/play
+            # here (UKE-29; see the module docstring for the Kid/Admin/Adult
+            # picture - gated on adult_mode now, not the old admin_mode flag,
+            # which only ever means "a browse screen is open").
             self._seek(self.config.admin_seek_seconds)
             return
         self._remember_position()
@@ -403,7 +465,7 @@ class TVApp:
             return
         if self.admin_insights_viewing:
             return
-        if self.admin_mode:
+        if self.adult_mode:
             self._seek(-self.config.admin_seek_seconds)
             return
         self._remember_position()
@@ -428,6 +490,15 @@ class TVApp:
         self.overlay.show_message(label)
 
     def _jump_last_channel(self) -> None:
+        if self.adult_mode and not self.admin_mode:
+            # Adult Mode's quick way back into picking a different episode
+            # (UKE-29) - repurposes the remote's Back/Last-channel button
+            # rather than needing to hold Power again. Kid Mode (and
+            # browsing itself, where this button isn't otherwise used) keep
+            # its normal "jump to previous channel" meaning below - see the
+            # module docstring.
+            self._quick_reopen_episode_list()
+            return
         if self._last_channel_number is None:
             return
         target = self._last_channel_number
@@ -437,6 +508,34 @@ class TVApp:
         self._last_channel_number = self.lineup.current.number
         self.lineup.select_number(target)
         self.tune_current()
+
+    def _quick_reopen_episode_list(self) -> None:
+        """Adult Mode's shortcut (UKE-29, see module docstring): jump
+        straight into the current channel's episode list without first
+        reopening the full grid, so switching to a different episode is one
+        button press instead of several. A no-op if the channel has no
+        episodes at all (nothing to list).
+        """
+        channel = self.lineup.current
+        if not channel.episodes:
+            return
+        self._pre_admin_path = self._playing_path
+        self._pre_admin_pos = self.player.get_time_pos() or 0.0
+        self.admin_browsing = False
+        self.admin_episode_browsing = True
+        self.admin_insights_viewing = False
+        self._browse_continue_index = None
+        self._browse_on_insights = False
+        self._browse_on_adult_toggle = False
+        self._scroll_y = 0
+        self._browse_number = channel.number
+        self._browse_episode_number = channel.number
+        try:
+            self._browse_episode_index = channel.episodes.index(self._playing_path)
+        except ValueError:
+            self._browse_episode_index = 0
+        self._show_admin_grid_background()
+        self._refresh_admin_panel()
 
     def select_channel_number(self, number: int) -> bool:
         """Tune directly to a channel number. Returns False if it doesn't exist."""
@@ -459,8 +558,9 @@ class TVApp:
 
         request = channel.tune_in()
         self._pending_banner = None
-        if self.admin_mode:
-            self.paused = False
+        # A genuine channel change should never leave a stale pause behind,
+        # in any mode.
+        self.paused = False
 
         if request is None:
             # No episodes on this channel: show the "no signal" screen.
@@ -583,6 +683,8 @@ class TVApp:
                 self._confirm_continue_selection()
             elif self._browse_on_insights:
                 self._confirm_insights_selection()
+            elif self._browse_on_adult_toggle:
+                self._confirm_adult_toggle()
             else:
                 self._confirm_show_selection()
             return
@@ -590,7 +692,7 @@ class TVApp:
             # Read-only screen - Power is the only thing that does anything
             # here (see _admin_back_from_insights).
             return
-        if self.admin_mode:
+        if self.adult_mode:
             self._toggle_pause()
             return
         self.muted = not self.muted
@@ -599,55 +701,109 @@ class TVApp:
 
     # -- admin/developer view -------------------------------------------------
     def _toggle_admin_mode(self) -> None:
-        self.admin_mode = not self.admin_mode
+        """Long-press Power (ADMIN_TOGGLE): open/close the browse grid.
+        Purely about the grid itself - Adult Mode (see the module
+        docstring) is independent and is never touched here, whichever way
+        this goes.
+        """
         if self.admin_mode:
-            # Opening admin mode always lands on the full-screen show grid,
-            # cursor starting on whatever's playing. Remember exactly where
-            # we are so browsing without picking anything new can resume it.
-            self.admin_browsing = True
-            self.admin_episode_browsing = False
-            self.admin_insights_viewing = False
-            self._browse_number = self.lineup.current.number
-            self._browse_episode_number = None
-            self._browse_episode_index = 0
-            self._browse_continue_index = None
-            self._browse_on_insights = False
-            self._refresh_continue_entries()
-            self._pre_admin_path = self._playing_path
-            self._pre_admin_pos = self.player.get_time_pos() or 0.0
-            self._show_admin_grid_background()
-            self._refresh_admin_panel()
+            self._close_admin_browsing()
         else:
-            self.admin_browsing = False
-            self.admin_episode_browsing = False
-            self.admin_insights_viewing = False
-            self._browse_continue_index = None
-            self._browse_on_insights = False
-            if self.paused:
-                self._toggle_pause()
-            self.overlay.clear_admin_panel()
-            if self._pre_admin_path is not None:
-                # Nothing new was picked this session - resume exactly where
-                # we left off rather than restarting/re-shuffling.
-                self._play_request(PlayRequest(path=self._pre_admin_path, start=self._pre_admin_pos))
-                self._pre_admin_path = None
-            self._show_info()
+            self._open_admin_browsing()
+
+    def _open_admin_browsing(self) -> None:
+        # Opening admin mode always lands on the full-screen show grid,
+        # cursor starting on whatever's playing. Remember exactly where
+        # we are so browsing without picking anything new can resume it.
+        self.admin_browsing = True
+        self.admin_episode_browsing = False
+        self.admin_insights_viewing = False
+        self._browse_number = self.lineup.current.number
+        self._browse_episode_number = None
+        self._browse_episode_index = 0
+        self._browse_continue_index = None
+        self._browse_on_insights = False
+        self._browse_on_adult_toggle = False
+        self._scroll_y = 0
+        self._refresh_continue_entries()
+        self._pre_admin_path = self._playing_path
+        self._pre_admin_pos = self.player.get_time_pos() or 0.0
+        self._sync_scroll_to_cursor()
+        self._show_admin_grid_background()
+        self._refresh_admin_panel()
+
+    def _close_admin_browsing(self) -> None:
+        # Go back to actually watching - Kid Mode if Adult Mode is off, or
+        # the same grown-up controls as before if it's on (UKE-29; see the
+        # module docstring). Unlike the old single admin_mode flag, this
+        # never force-unpauses under Adult Mode - there's no reason a
+        # grown-up who paused before glancing at the grid should come back
+        # to it playing again.
+        self.admin_browsing = False
+        self.admin_episode_browsing = False
+        self.admin_insights_viewing = False
+        self._browse_continue_index = None
+        self._browse_on_insights = False
+        self._browse_on_adult_toggle = False
+        if not self.adult_mode and self.paused:
+            self._toggle_pause()
+        self.overlay.clear_admin_panel()
+        if self._pre_admin_path is not None:
+            # Nothing new was picked this session - resume exactly where
+            # we left off rather than restarting/re-shuffling.
+            self._play_request(PlayRequest(path=self._pre_admin_path, start=self._pre_admin_pos))
+            self._pre_admin_path = None
+        self._flash_channel_banner()
 
     def _show_admin_grid_background(self) -> None:
-        """Swap the player onto the pre-composed poster-grid image (see
-        nostalgiabox.thumbnails) so real show art fills the screen behind the
-        highlight ring/labels overlay.show_admin_browser draws. If it hasn't
-        been generated yet (--check was never run since adding shows), this
-        is a no-op - the browse overlay still works, just without posters,
-        drawn over whatever was already playing.
-        """
-        from .thumbnails import GRID_FILENAME
+        """Swap the player onto the current viewport crop of the pre-
+        composed poster-grid image (see nostalgiabox.thumbnails) so real
+        show art fills the whole screen behind the highlight ring/labels
+        overlay.show_admin_browser draws. Bypasses the usual 4:3 pillarbox
+        filter (``use_frame_filter=False``, UKE-29) - the admin UI is a
+        modern full-width screen, not the nostalgic 4:3 "tube" every actual
+        show plays in (see thumbnails.py's module docstring).
 
-        image_path = self._admin_thumbs_cache_dir() / GRID_FILENAME
-        if image_path.is_file():
-            self.player.play_loop(image_path)
-        else:
+        If the background image hasn't been generated yet (``--check`` was
+        never run since adding shows), this is a no-op - the browse overlay
+        still works, just without posters, drawn over whatever was already
+        playing.
+        """
+        from . import thumbnails
+
+        image_path = self._admin_thumbs_cache_dir() / thumbnails.GRID_FILENAME
+        if not image_path.is_file():
             log.info("admin show-grid image not found (run `nostalgiabox --check`)")
+            return
+
+        self._scroll_y = thumbnails.clamp_scroll(self._admin_tiles(), self._scroll_y)
+        viewport_path = self._admin_thumbs_cache_dir() / thumbnails.VIEWPORT_FILENAME
+        cropped = thumbnails.crop_viewport(image_path, self._scroll_y, viewport_path)
+        self.player.play_loop(cropped or image_path, use_frame_filter=False)
+
+    def _sync_admin_scroll(self, *, target_top: int, target_bottom: int) -> None:
+        """Scroll the grid, if needed, so the row spanning image-space rows
+        ``[target_top, target_bottom)`` (see
+        :func:`nostalgiabox.thumbnails.admin_section_layout`/
+        ``sections_bottom``) is fully visible, then reloads the background
+        image at the new scroll position (see _show_admin_grid_background).
+        A no-op if the row's already fully on screen - called any time the
+        browse cursor moves to a different row (see _move_browse_cursor).
+        """
+        from . import thumbnails
+
+        body_h = thumbnails.body_viewport_height()
+        visible_top = thumbnails.GRID_HEADER_H + self._scroll_y
+        visible_bottom = visible_top + body_h
+        new_scroll = self._scroll_y
+        if target_top < visible_top:
+            new_scroll = target_top - thumbnails.GRID_HEADER_H
+        elif target_bottom > visible_bottom:
+            new_scroll = target_bottom - body_h - thumbnails.GRID_HEADER_H
+        new_scroll = thumbnails.clamp_scroll(self._admin_tiles(), new_scroll)
+        if new_scroll != self._scroll_y:
+            self._scroll_y = new_scroll
+            self._show_admin_grid_background()
 
     def _reopen_player(self) -> None:
         """Rebuild mpv via the injected factory (real hardware only - see
@@ -672,12 +828,17 @@ class TVApp:
         self.overlay.rebind_player(self.player)
 
     def _refresh_admin_panel(self) -> None:
-        if not self.admin_mode:
-            return
+        # Once none of the three browse screens are open (UKE-29), there's
+        # nothing persistent to show any more - explicitly clear rather than
+        # leaving whichever screen was open last still on the overlay slot.
+        # See show_adult_mode_status/show_message for Adult Mode's transient
+        # feedback instead.
         if self.admin_episode_browsing:
             channel = self._channel_by_number(self._browse_episode_number)
             if channel is not None:
-                self.overlay.show_admin_episode_list(channel, highlight_index=self._browse_episode_index)
+                self.overlay.show_admin_episode_list(
+                    channel, highlight_index=self._browse_episode_index, watch_state=self.watch_state
+                )
             return
         if self.admin_insights_viewing:
             summary, suggestions = self._current_insights()
@@ -690,9 +851,12 @@ class TVApp:
                 continue_entries=self._continue_entries,
                 continue_index=self._browse_continue_index,
                 insights_selected=self._browse_on_insights,
+                adult_mode=self.adult_mode,
+                adult_toggle_selected=self._browse_on_adult_toggle,
+                scroll_y=self._scroll_y,
             )
             return
-        self.overlay.show_admin_panel(self.lineup, paused=self.paused)
+        self.overlay.clear_admin_panel()
 
     def _refresh_continue_entries(self) -> None:
         """Recompute the Continue Watching row's contents (see
@@ -718,11 +882,9 @@ class TVApp:
 
     def _admin_tiles(self) -> List[Channel]:
         """Every tile the admin browse grid shows: real channels, then game
-        systems, in that order. Games are never part of self.lineup - see
-        __init__ - this combined view exists only for the admin browse
-        screens (the small corner panel from show_admin_panel stays
-        channels-only, deliberately, since it's shown while actively
-        watching, not browsing).
+        systems, in that order. Games are never part of self.lineup (see
+        __init__) - this combined view exists only for the admin browse
+        screens.
         """
         return list(self.lineup) + list(self.games)
 
@@ -750,11 +912,11 @@ class TVApp:
     def _section_keys(self) -> List[str]:
         """Every browse row currently on screen, top to bottom: Continue
         Watching (only if it has anything in it), then Shows, then Games -
-        each only present if it isn't empty - then Insights, always present
-        as a single evergreen row at the bottom (UKE-29) regardless of
-        what's been watched yet. This is recomputed on every move rather
-        than cached, since it's cheap and always needs to reflect
-        self._continue_entries's current contents anyway.
+        each only present if it isn't empty - then the two evergreen rows,
+        Insights and the Adult Mode toggle (UKE-29), always present at the
+        bottom regardless of what's been watched yet. This is recomputed on
+        every move rather than cached, since it's cheap and always needs to
+        reflect self._continue_entries's current contents anyway.
         """
         keys = []
         if self._continue_entries:
@@ -764,6 +926,7 @@ class TVApp:
         if self._section_tiles("games"):
             keys.append("games")
         keys.append("insights")
+        keys.append("adult_toggle")
         return keys
 
     def _current_section(self) -> str:
@@ -771,6 +934,8 @@ class TVApp:
             return "continue"
         if self._browse_on_insights:
             return "insights"
+        if self._browse_on_adult_toggle:
+            return "adult_toggle"
         channel = self._channel_by_number(self._browse_number)
         if channel is not None and channel.config.kind == "game":
             return "games"
@@ -782,28 +947,51 @@ class TVApp:
         horizontal position across rows of different lengths, and matches
         landing on the leftmost card the way most on-screen row UIs do.
         """
-        if key == "continue":
-            self._browse_continue_index = 0
-            self._browse_on_insights = False
-            return
-        if key == "insights":
-            self._browse_continue_index = None
-            self._browse_on_insights = True
-            return
         self._browse_continue_index = None
         self._browse_on_insights = False
+        self._browse_on_adult_toggle = False
+        if key == "continue":
+            self._browse_continue_index = 0
+            return
+        if key == "insights":
+            self._browse_on_insights = True
+            return
+        if key == "adult_toggle":
+            self._browse_on_adult_toggle = True
+            return
         tiles = self._section_tiles(key)
         if tiles:
             self._browse_number = tiles[0].number
 
+    def _section_scroll_bounds(self, key: str) -> Optional[tuple[int, int]]:
+        """Image-space (top, bottom) a given row occupies, for
+        _sync_admin_scroll - ``None`` for rows that are either pinned (never
+        need scrolling, like Continue Watching) or don't currently exist.
+        """
+        from . import thumbnails
+
+        if key == "continue":
+            return None  # pinned above the header - always visible, see GRID_HEADER_H
+        if key in ("shows", "games"):
+            return thumbnails.section_bounds(self._admin_tiles(), "Shows" if key == "shows" else "Games")
+        bottom = thumbnails.sections_bottom(self._admin_tiles())
+        insights_top = bottom + thumbnails.EVERGREEN_GAP_ABOVE
+        insights_bottom = insights_top + thumbnails.EVERGREEN_ROW_H
+        if key == "insights":
+            return insights_top, insights_bottom
+        if key == "adult_toggle":
+            adult_top = insights_bottom + thumbnails.EVERGREEN_GAP_ABOVE
+            return adult_top, adult_top + thumbnails.EVERGREEN_ROW_H
+        return None
+
     def _move_browse_cursor(self, *, drow: int = 0, dcol: int = 0) -> None:
         """Move the browse cursor. The screen is a stack of independent
-        single-row "swimlanes" - Continue Watching, Shows, Games, Insights
-        (each only present if it has anything in it, except Insights which
-        is always there; see _section_keys) - rather than a flat grid.
-        Channel Up/Down move between rows and stop at the top/bottom (no
-        wraparound between rows); Volume Up/Down move within whichever row
-        the cursor is on, wrapping at its ends.
+        single-row "swimlanes" - Continue Watching, Shows, Games, Insights,
+        Adult Mode (each only present if it has anything in it, except the
+        last two which are always there; see _section_keys) - rather than a
+        flat grid. Channel Up/Down move between rows and stop at the top/
+        bottom (no wraparound between rows); Volume Up/Down move within
+        whichever row the cursor is on, wrapping at its ends.
         """
         sections = self._section_keys()
         if not sections:
@@ -818,11 +1006,17 @@ class TVApp:
                 n = len(self._continue_entries)
                 if n:
                     self._browse_continue_index = (self._browse_continue_index + dcol) % n
-            elif current_key != "insights":
+            elif current_key not in ("insights", "adult_toggle"):
                 numbers = [c.number for c in self._section_tiles(current_key)]
                 if numbers:
                     pos = numbers.index(self._browse_number) if self._browse_number in numbers else 0
                     self._browse_number = numbers[(pos + dcol) % len(numbers)]
+                    # A section can wrap onto multiple visual rows (UKE-29,
+                    # see thumbnails.admin_section_layout) - moving within it
+                    # via Volume Up/Down can land on a tile in a different
+                    # row than the one currently on screen, same as moving
+                    # between sections entirely (below) can.
+                    self._sync_scroll_to_cursor()
             self._refresh_admin_panel()
             return
 
@@ -831,7 +1025,36 @@ class TVApp:
             new_idx = idx + drow
             if 0 <= new_idx < len(sections):
                 self._enter_section(sections[new_idx])
+                self._sync_scroll_to_cursor()
             self._refresh_admin_panel()
+
+    def _sync_scroll_to_cursor(self) -> None:
+        """Scroll the grid, if needed, so whatever's currently highlighted -
+        a tile, or one of the two evergreen rows - is fully visible (UKE-29,
+        see _sync_admin_scroll). A no-op for the Continue Watching row
+        (pinned above the header - see GRID_HEADER_H - so it never needs
+        scrolling) or if nothing's actually highlighted yet.
+        """
+        from . import thumbnails
+
+        key = self._current_section()
+        if key == "continue":
+            return
+        if key in ("insights", "adult_toggle"):
+            bounds = self._section_scroll_bounds(key)
+        else:
+            bounds = None
+            channel = self._channel_by_number(self._browse_number)
+            if channel is not None:
+                for section in thumbnails.admin_section_layout(self._admin_tiles()):
+                    for tile in section.tiles:
+                        if tile.channel.number == channel.number:
+                            bounds = thumbnails.tile_bounds(tile)
+                            break
+                    if bounds is not None:
+                        break
+        if bounds is not None:
+            self._sync_admin_scroll(target_top=bounds[0], target_bottom=bounds[1])
 
     def _confirm_show_selection(self) -> None:
         self.admin_browsing = False
@@ -840,6 +1063,15 @@ class TVApp:
             self.admin_episode_browsing = True
             self._browse_episode_number = channel.number
             self._browse_episode_index = 0
+        self._refresh_admin_panel()
+
+    def _confirm_adult_toggle(self) -> None:
+        """Flip Adult Mode on/off (UKE-29, see the module docstring) - stays
+        on the grid (unlike confirming a show/Insights) since there's
+        nothing to navigate into, just a brief transient confirmation.
+        """
+        self.adult_mode = not self.adult_mode
+        self.overlay.show_adult_mode_status(on=self.adult_mode)
         self._refresh_admin_panel()
 
     def _confirm_continue_selection(self) -> None:
@@ -963,12 +1195,33 @@ class TVApp:
     def _toggle_pause(self) -> None:
         self.paused = not self.paused
         self.player.set_pause(self.paused)
+        # No persistent overlay to refresh anymore while just watching under
+        # Adult Mode (UKE-29) - a brief OSD message instead, same treatment
+        # as every other Adult Mode action (seek, subtitles).
+        self.overlay.show_message("Paused" if self.paused else "Playing")
         self._refresh_admin_panel()
 
     # -- info / standby -----------------------------------------------------
     def _show_info(self) -> None:
+        # Adult Mode repurposes Info into a subtitle toggle while actually
+        # watching (not browsing) - UKE-29, see the module docstring. Kid
+        # Mode (and browsing itself, which has its own Info-less footer
+        # hints) keep Info's original channel-banner behaviour. Internal
+        # callers that specifically want the banner regardless of mode (e.g.
+        # closing the grid) use _flash_channel_banner directly instead.
+        if self.adult_mode and not self.admin_mode:
+            self._toggle_subtitles()
+            return
+        self._flash_channel_banner()
+
+    def _flash_channel_banner(self) -> None:
         channel = self.lineup.current
         self.overlay.show_channel_bug(channel.number, channel.name)
+
+    def _toggle_subtitles(self) -> None:
+        self.subtitles_visible = not self.subtitles_visible
+        self.player.set_subtitle_visible(self.subtitles_visible)
+        self.overlay.show_message("Subtitles: ON" if self.subtitles_visible else "Subtitles: OFF")
 
     def _toggle_standby(self) -> None:
         self.standby = not self.standby
@@ -977,17 +1230,20 @@ class TVApp:
             self._switch_deadline = None
             self._pending_banner = None
             # Standby is the kid-proof reset point: never leave the box
-            # sitting in admin mode / paused / mid-browse underneath a
-            # blanked screen.
-            self.admin_mode = False
+            # sitting in admin/Adult Mode / paused / mid-browse underneath a
+            # blanked screen (UKE-29 - this now also drops Adult Mode, which
+            # otherwise deliberately survives everything else).
             self.admin_browsing = False
             self.admin_episode_browsing = False
             self.admin_insights_viewing = False
+            self.adult_mode = False
             self._browse_number = None
             self._browse_episode_number = None
             self._browse_episode_index = 0
             self._browse_continue_index = None
             self._browse_on_insights = False
+            self._browse_on_adult_toggle = False
+            self._scroll_y = 0
             self._continue_entries = []
             self._pre_admin_path = None
             self.paused = False

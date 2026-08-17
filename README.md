@@ -9,8 +9,10 @@ automatically on an endless shuffle. It boots straight to the TV on power-up, is
 driven by a simple remote, sends audio over HDMI, and has an authentic
 early-2000s vibe — a green on-screen channel banner and volume bar, and a curved
 "CRT" picture. No menus, no apps, no touchscreens. Just a remote and channels. Grown-ups get
-a hidden admin view (hold Power) with a modern, Netflix-style channel and
-episode browser, poster art, and pause/play - kids never see it.
+a hidden, full-width admin view (hold Power) with a modern, Netflix-style
+channel and episode browser, poster art, watch progress, and a sticky
+"Adult Mode" that unlocks pause/seek/subtitles while watching - kids never
+see any of it.
 
 This guide has two parts:
 
@@ -257,36 +259,59 @@ Turn it on by plugging in power; it boots back to a channel automatically.
 ### Admin/developer view
 
 Holding **Power** for about 3 seconds (instead of a quick press, which just
-toggles standby) opens a hidden screen meant for adults: a modern, dark
-**"Select a channel"** grid with a real poster thumbnail for every channel
-(auto-generated from each show's first episode) and its episode count, with
-the current one ringed. It's a two-step browser:
+toggles standby) opens a hidden screen meant for adults: a modern, dark,
+**full-width** "Select a channel" grid with a real poster thumbnail for every
+channel (auto-generated from each show's first episode), its episode count,
+and its watch progress, with the current one ringed. If there's more here
+than fits on one screen, it wraps onto extra rows and scrolls - posters stay
+a fixed, comfortable size rather than shrinking to cram everything into one
+row. It's a two-step browser:
 
 1. **Show grid.** **Channel Up/Down** moves the selection up/down a row,
-   **Volume Up/Down** moves it left/right within a row (this is just
-   scrolling - nothing changes yet). **Mute** confirms the highlighted show
-   and opens its episode list.
-2. **Episode list.** A plain numbered list of every episode in that show.
-   **Channel Up/Down** moves the highlighted episode. **Mute** confirms it and
-   starts playing that exact episode, clearing the grid down to a small
-   corner readout so the show keeps playing. **Power** (a normal press, not a
-   hold) backs out to the show grid instead of going to standby.
+   **Volume Up/Down** moves it left/right within a row, scrolling as needed
+   to keep the highlight on screen (this is just navigation - nothing
+   changes yet). Below the real channels/games sit two rows that are always
+   there regardless of what's configured: **Watch Insights** (see below) and
+   an **Adult Mode** toggle. **Mute** confirms whatever's highlighted - a
+   show opens its episode list, Insights opens the stats screen, and the
+   Adult Mode row flips it on/off with a brief on-screen confirmation.
+2. **Episode list.** A numbered list of every episode in that show, each one
+   showing its watch state - "✓ Watched" or "N% watched" for anything
+   in progress. **Channel Up/Down** moves the highlighted episode. **Mute**
+   confirms it and starts playing that exact episode. **Power** (a normal
+   press, not a hold) backs out to the show grid instead of going to standby.
 
 **Hold Power** again at any point - grid, episode list, or once something's
-playing - to close the admin view entirely. If you close it without ever
-confirming an episode, playback resumes exactly where it was when you opened
-admin mode; nothing is interrupted just by looking around.
+playing - to close the admin view. If you close it without ever confirming an
+episode, playback resumes exactly where it was when you opened it; nothing is
+interrupted just by looking around. Closing the browse screens on their own
+never leaves anything lingering on screen - no permanent overlay, just the
+picture.
 
-Once you've confirmed an episode, **Mute** switches roles again and becomes
-**pause/play** - a control the kid-facing remote never
-exposes, since a small kid pausing the TV mid-show tends to end in tears.
-**Channel Up/Down** also switches roles: instead of changing the channel, it
-skips forward/backward within the current episode by `admin_seek_seconds`
-(default `10.0`) - a grown-up-only scrub control, shown as a "»"/"«" OSD
-message with the resulting position. To actually change the channel again,
-hold Power to close admin mode first - Channel Up/Down goes back to normal
-once you're out. To browse again, hold Power to close admin mode, then hold
-it again to reopen the grid.
+#### Adult Mode
+
+Turning on the **Adult Mode** row in the grid unlocks a grown-up-only control
+surface while a show is actually playing, and - unlike everything else in
+this section - it's *sticky*: it stays on across closing the grid and
+changing channels, until you flip it off again from that same row (or it gets
+reset by standby, see below).
+
+While Adult Mode is on and you're just watching (not browsing):
+
+- **Mute** becomes **pause/play** - a control the kid remote never exposes,
+  since a small kid pausing the TV mid-show tends to end in tears.
+- **Channel Up/Down** skips forward/backward within the current episode by
+  `admin_seek_seconds` (default `10.0`) instead of changing the channel,
+  shown as a "»"/"«" OSD message with the resulting position.
+- **Info** toggles subtitles on/off instead of flashing the channel banner.
+- **Back/Last-channel** jumps straight into the current show's episode list
+  - a one-button shortcut for switching to a different episode without first
+  reopening the whole grid.
+
+Every one of these shows a brief on-screen message and nothing more - the
+same transient style as the volume bar - so there's never a persistent panel
+glued to the picture. To actually change the channel or use Back/Last-channel
+normally again, turn Adult Mode off from the grid first.
 
 A couple of notes:
 
@@ -296,14 +321,16 @@ A couple of notes:
   channel has no readable video yet, its tile just falls back to a plain
   placeholder instead of a poster.
 - It only works while a channel is on screen - not from standby, and putting
-  the box into standby closes the admin view (grid, episode list, or neither)
-  and un-pauses first, so a kid power-cycling the box can never get stuck on
-  a paused or half-browsed screen.
+  the box into standby closes the browse screens *and* turns Adult Mode off,
+  un-pausing first, so a kid power-cycling the box can never get stuck on a
+  paused, half-browsed, or unlocked screen.
 - Turn it off entirely with `admin_mode_enabled: false` in `config.yaml`, or
   change how long the hold needs to be with `admin_hold_seconds` (default
   `3.0`).
 - Change the seek skip size with `admin_seek_seconds` (default `10.0`,
   1-300).
+- Set whether subtitles start on or off with `subtitles_default` (default
+  `false`).
 - In `--dry-run` dev mode on a laptop keyboard, press **a** instead of timing
   a hold.
 
@@ -324,8 +351,9 @@ and waits.
 
 #### Insights
 
-A third row, always present at the bottom of the show grid regardless of
-what's configured. **Mute** opens a read-only screen: total minutes
+One of the two evergreen rows at the bottom of the show grid, always present
+regardless of what's configured (see Adult Mode above for the other).
+**Mute** opens a read-only screen: total minutes
 watched, episodes watched, and game sessions played; a "favorite" channel
 (whichever one has the most engagement - watched minutes for shows, play
 count for games); a completion bar per channel/game system; a recent-
@@ -364,8 +392,10 @@ transition: none         # channel-change effect: none | glitch | static
 bridge_seconds: 0.8      # keep the current show playing while the next loads
 channel_bug_seconds: 4   # how long the channel banner lingers
 initial_volume: 70       # 0-100
-admin_mode_enabled: true # hidden grown-ups view (posters, episode picker, pause/play)
+admin_mode_enabled: true # hidden grown-ups view (posters, episode picker, Adult Mode)
 admin_hold_seconds: 3.0  # how long to hold Power to open it
+admin_seek_seconds: 10.0 # Adult Mode's Channel Up/Down scrub size, 1-300
+subtitles_default: false # subtitles on/off at boot; toggled via Info in Adult Mode
 audio_device: "..."      # force HDMI audio (see Part H)
 
 games:                   # optional: emulated systems, browsed alongside channels in admin mode
@@ -433,7 +463,8 @@ nostalgiabox/
 ├── channel.py     folder scanning, tune-in modes, channel navigation
 ├── player.py      mpv player (+ a mock for tests)
 ├── overlay.py     the on-screen display: retro CRT readouts (channel bug,
-│                  volume) and the modern admin-mode grid/episode list/Insights
+│                  volume) and the modern, full-width admin-mode grid/
+│                  episode list/Insights
 ├── crt.py         the CRT shader
 ├── input/         remote input (Flirc/keyboard, HDMI-CEC, keymap)
 ├── static_gen.py  ffmpeg-generated static/glitch/colour-bar clips

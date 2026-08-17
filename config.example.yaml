@@ -130,17 +130,22 @@ scan_recursive: true      # also look inside season sub-folders for episodes
 # shuffle_seed: 1234       # set for a repeatable shuffle order (mostly for tests)
 
 # --- Admin/developer view -----------------------------------------------------
-# A hidden, grown-ups-only screen: a poster grid of every channel, an episode
-# picker inside each one, and pause/play (things the kid-facing remote never
-# gets). Reached by holding the Power button. See 'Admin/developer view' in
-# the README. Poster thumbnails are generated automatically by
-# `nostalgiabox --check` (via ffmpeg) - nothing to configure for that.
+# A hidden, grown-ups-only, full-width screen: a poster grid of every channel
+# (with watch progress), an episode picker inside each one, and a sticky
+# "Adult Mode" toggle that unlocks pause/seek/subtitles while watching
+# (things the kid-facing remote never gets). Reached by holding the Power
+# button. See 'Admin/developer view' in the README. Poster thumbnails are
+# generated automatically by `nostalgiabox --check` (via ffmpeg) - nothing to
+# configure for that.
 admin_mode_enabled: true    # set false to remove the feature entirely
 admin_hold_seconds: 3.0     # how long to hold Power to trigger it (0.5-15)
-# Once something's playing in admin mode (not browsing), Channel Up/Down
-# skip forward/backward by this many seconds instead of changing channels -
-# a grown-up-only seek control (1-300).
+# Once Adult Mode is on and something's playing (not browsing), Channel
+# Up/Down skip forward/backward by this many seconds instead of changing
+# channels - a grown-up-only seek control (1-300).
 admin_seek_seconds: 10.0
+# Subtitles on/off at boot. Toggled live via the Info button while Adult Mode
+# is on and something's playing.
+subtitles_default: false
 
 # --- Games (optional) ---------------------------------------------------------
 # Emulated game systems, launched via RetroArch, browsed the same way as

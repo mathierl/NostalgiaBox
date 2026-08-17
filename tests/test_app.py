@@ -417,13 +417,12 @@ def test_mute_confirms_episode_and_plays_it(tmp_path):
     send(app, Action.MUTE)  # confirm episode
     assert not app.admin_episode_browsing
     assert not app.admin_browsing
-    assert app.admin_mode  # back to the lightweight corner panel, not exited
+    assert not app.admin_mode  # back to actually watching - grid fully closed (UKE-29)
     assert app.lineup.current.number == 2
     assert player.current == expected_path
     assert player.played[-1] == (expected_path, 0.0)
     assert player.muted is False
-    assert "Select a channel" not in player.overlays.get(5, "")
-    assert "Select an episode" not in player.overlays.get(5, "")
+    assert 5 not in player.overlays  # nothing admin-related left on screen either
 
 
 def test_confirming_a_show_and_episode_never_closes_mpv(tmp_path):
@@ -584,8 +583,12 @@ def test_browsing_without_picking_anything_resumes_on_exit(tmp_path):
 
 
 def test_mute_becomes_pause_play_once_watching(tmp_path):
+    # Pause/play via Mute is an Adult Mode control (UKE-29, see the module
+    # docstring) - it does nothing special in Kid Mode (see
+    # test_kid_mode_mute_stays_a_real_mute_even_after_watching_an_episode).
     app, player, _ = build_app(tmp_path)
     app.start()
+    app.adult_mode = True
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.MUTE)  # confirm show
     send(app, Action.MUTE)  # confirm episode -> now watching
@@ -598,47 +601,74 @@ def test_mute_becomes_pause_play_once_watching(tmp_path):
     assert player.paused is False
 
 
-def test_exiting_admin_mode_unpauses_and_clears_panel(tmp_path):
+def test_kid_mode_mute_stays_a_real_mute_even_after_watching_an_episode(tmp_path):
+    # Regression guard: without Adult Mode on, picking a show/episode from
+    # the grid must not leave Mute repurposed - it's a real mute, exactly as
+    # it always was, since Adult Mode (not just having glanced at the grid)
+    # is what unlocks pause/seek/subtitles (UKE-29).
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.MUTE)  # confirm show
     send(app, Action.MUTE)  # confirm episode
+    assert not app.adult_mode
+    send(app, Action.MUTE)
+    assert app.muted is True
+    assert player.muted is True
+    assert app.paused is False
+
+
+def test_exiting_admin_mode_under_adult_mode_preserves_pause_with_no_panel_left_behind(tmp_path):
+    # UKE-29: unlike the old single admin_mode flag (which always force-
+    # unpaused on exit), closing the grid under Adult Mode leaves the pause
+    # state exactly as it was - and, the actual bug report this fixes,
+    # nothing is left glued to the screen either way (no persistent panel).
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    app.adult_mode = True
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm show
+    send(app, Action.MUTE)  # confirm episode
     send(app, Action.MUTE)  # pause
     assert app.paused
-    send(app, Action.ADMIN_TOGGLE)  # exit admin mode
+    send(app, Action.ADMIN_TOGGLE)  # reopen the grid...
+    assert app.admin_mode
+    send(app, Action.ADMIN_TOGGLE)  # ...and close it again
     assert not app.admin_mode
     assert not app.admin_browsing and not app.admin_episode_browsing
-    assert not app.paused
-    assert player.paused is False
-    assert 5 not in player.overlays  # admin panel cleared
+    assert app.paused  # untouched - Adult Mode kept it
+    assert player.paused is True
+    assert 5 not in player.overlays  # nothing admin-related left on screen
 
 
-def test_changing_channel_while_watching_unpauses_and_refreshes_panel(tmp_path):
+def test_changing_channel_while_watching_unpauses_and_shows_channel_bug(tmp_path):
     # bridge_seconds=0: channel bug appears immediately instead of waiting on
     # the (pending) cut-over deadline, keeping this test's assertion simple.
     app, player, _ = build_app(tmp_path, bridge_seconds=0)
     app.start()
+    app.adult_mode = True
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.MUTE)  # confirm show
     send(app, Action.MUTE)  # confirm episode -> watching channel 2
     send(app, Action.MUTE)  # pause
     assert app.paused
-    # Channel Up/Down seeks while admin_mode is on (see the seek tests
-    # below) - a real channel change needs to leave admin mode first.
-    send(app, Action.ADMIN_TOGGLE)
+    # Channel Up/Down seek instead of changing channel while Adult Mode is
+    # on (see the seek tests below) - turning it off (as if from the grid's
+    # toggle row) hands Channel Up/Down back to normal channel-surfing.
+    app.adult_mode = False
     send(app, Action.CHANNEL_UP)
     assert not app.paused  # fresh channel: no longer paused
     assert "CH 03" in player.overlays.get(1, "")  # channel bug confirms the real change
 
 
-def test_channel_up_down_seek_instead_of_changing_channel_while_watching_in_admin_mode(tmp_path):
+def test_channel_up_down_seek_instead_of_changing_channel_under_adult_mode(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
+    app.adult_mode = True
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.MUTE)  # confirm show
-    send(app, Action.MUTE)  # confirm episode -> watching channel 2, still in admin mode
-    assert app.admin_mode
+    send(app, Action.MUTE)  # confirm episode -> watching channel 2
+    assert not app.admin_mode  # grid is closed - Adult Mode, not browsing, drives this
     assert player.time_pos == 0.0
     send(app, Action.CHANNEL_UP)
     assert player.time_pos == app.config.admin_seek_seconds
@@ -649,9 +679,23 @@ def test_channel_up_down_seek_instead_of_changing_channel_while_watching_in_admi
     assert app.lineup.current.number == 2
 
 
+def test_channel_up_down_change_channels_normally_without_adult_mode(tmp_path):
+    # Regression guard for the other direction: with Adult Mode off, Channel
+    # Up/Down keep their normal kid-facing meaning even after watching an
+    # episode picked from the grid.
+    app, player, _ = build_app(tmp_path, bridge_seconds=0)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm show
+    send(app, Action.MUTE)  # confirm episode -> watching channel 2
+    send(app, Action.CHANNEL_UP)
+    assert app.lineup.current.number == 3  # a real channel change, not a seek
+
+
 def test_seek_shows_an_osd_message_with_the_new_position(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
+    app.adult_mode = True
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.MUTE)  # confirm show
     send(app, Action.MUTE)  # confirm episode
@@ -690,21 +734,244 @@ def test_admin_toggle_ignored_while_in_standby(tmp_path):
     assert not app.admin_mode  # blocked, same as every other action in standby
 
 
-def test_entering_standby_resets_admin_mode_browsing_and_pause(tmp_path):
+def test_entering_standby_resets_adult_mode_browsing_and_pause(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
+    app.adult_mode = True
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.MUTE)  # confirm show
     send(app, Action.MUTE)  # confirm episode
     send(app, Action.MUTE)  # pause
-    assert app.admin_mode and app.paused
+    assert app.adult_mode and app.paused
     send(app, Action.POWER)  # standby
     assert not app.admin_mode
     assert not app.admin_browsing and not app.admin_episode_browsing
     assert not app.admin_insights_viewing
+    assert not app.adult_mode  # standby is the kid-proof reset point (UKE-29)
     assert not app.paused
     assert app._pre_admin_path is None
     assert 5 not in player.overlays
+
+
+# -- Adult Mode toggle, quick episode-switch, subtitles (UKE-29) ------------
+# Real-hardware feedback split the old single admin_mode flag into three
+# states - see the module docstring. These tests drive the *actual* toggle
+# row in the grid (rather than poking app.adult_mode directly, like the
+# pause/seek tests above do) to cover _confirm_adult_toggle and its wiring
+# into _section_keys/_move_browse_cursor.
+
+
+def _walk_to_adult_toggle(app):
+    for _ in range(8):
+        if app._current_section() == "adult_toggle":
+            return
+        send(app, Action.CHANNEL_DOWN)
+    raise AssertionError("never reached the adult mode toggle row")
+
+
+def test_confirming_the_adult_toggle_flips_it_and_stays_on_the_grid(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    _walk_to_adult_toggle(app)
+    assert not app.adult_mode
+
+    send(app, Action.MUTE)  # confirm - flips the toggle
+    assert app.adult_mode
+    assert app.admin_browsing  # stayed on the grid, unlike confirming a show
+    assert "Adult Mode: ON" in player.overlays.get(4, "")  # transient confirmation
+
+    send(app, Action.MUTE)  # flip it back off
+    assert not app.adult_mode
+    assert "Adult Mode: OFF" in player.overlays.get(4, "")
+
+
+def test_adult_mode_survives_closing_and_reopening_the_grid(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    _walk_to_adult_toggle(app)
+    send(app, Action.MUTE)  # turn it on
+    send(app, Action.ADMIN_TOGGLE)  # close the grid entirely
+    assert not app.admin_mode
+    assert app.adult_mode  # sticky - survives closing the grid (UKE-29)
+    send(app, Action.ADMIN_TOGGLE)  # reopen
+    assert app.adult_mode  # still on
+
+
+def test_back_button_reopens_episode_list_under_adult_mode(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    app.adult_mode = True
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm show (Dragon Tales)
+    send(app, Action.CHANNEL_DOWN)  # episode index 1
+    channel = next(c for c in app.lineup if c.number == 2)
+    send(app, Action.MUTE)  # confirm episode 1 -> watching, grid closed
+    assert not app.admin_mode
+    playing_before = player.current
+    pos_before = player.time_pos
+
+    send(app, Action.LAST_CHANNEL)  # the quick-reopen shortcut (UKE-29)
+    assert app.admin_episode_browsing
+    assert not app.admin_browsing
+    assert app._browse_episode_number == 2
+    assert app._browse_episode_index == 1  # preselects the episode actually playing
+    # Remembered exactly what was playing so backing out without picking
+    # anything new resumes it - same bookkeeping _toggle_admin_mode does.
+    assert app._pre_admin_path == playing_before
+    assert app._pre_admin_pos == pos_before
+    assert "Dragon Tales" in player.overlays.get(5, "")
+
+    # backing out without picking anything new still resumes correctly
+    send(app, Action.POWER)  # back to the grid
+    send(app, Action.ADMIN_TOGGLE)  # exit entirely
+    assert player.current == playing_before
+
+
+def test_back_button_keeps_normal_meaning_without_adult_mode(tmp_path):
+    # Regression guard: Kid Mode (and Admin Mode without Adult Mode on)
+    # keeps Last-Channel's ordinary "jump to previous channel" behavior.
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.CHANNEL_UP)  # now on ch 3, last=2
+    assert app.lineup.current.number == 3
+    send(app, Action.LAST_CHANNEL)
+    assert app.lineup.current.number == 2
+    assert not app.admin_episode_browsing
+
+
+def test_back_button_quick_reopen_is_a_noop_on_an_empty_channel(tmp_path):
+    (tmp_path / "empty").mkdir()
+    config = config_from_dict(
+        {"channels": [{"number": 2, "name": "Empty", "path": str(tmp_path / "empty")}]}
+    )
+    app = TVApp(config, MockPlayer(), InputManager([]), clock=FakeClock())
+    app.start()
+    app.adult_mode = True
+    send(app, Action.LAST_CHANNEL)
+    assert not app.admin_episode_browsing
+
+
+def test_info_toggles_subtitles_under_adult_mode(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    app.adult_mode = True
+    assert app.subtitles_visible is False  # config default
+    send(app, Action.INFO)
+    assert app.subtitles_visible is True
+    assert player.subtitles_visible is True
+    assert "Subtitles: ON" in player.overlays.get(4, "")
+    send(app, Action.INFO)
+    assert app.subtitles_visible is False
+    assert player.subtitles_visible is False
+
+
+def test_info_shows_channel_banner_in_kid_mode(tmp_path):
+    # Regression guard: Info keeps its original behaviour unless Adult Mode
+    # is actively on and nothing's being browsed.
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    player.overlays.pop(1, None)
+    send(app, Action.INFO)
+    assert 1 in player.overlays  # channel bug shown
+    assert player.subtitles_visible is False  # unchanged from start()'s config default
+
+
+def test_info_shows_channel_banner_while_browsing_even_under_adult_mode(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    app.adult_mode = True
+    send(app, Action.ADMIN_TOGGLE)  # browsing - Info shouldn't toggle subtitles here
+    player.overlays.pop(1, None)
+    send(app, Action.INFO)
+    assert 1 in player.overlays
+    assert player.subtitles_visible is False
+
+
+def test_subtitles_default_from_config(tmp_path):
+    app, player, _ = build_app(tmp_path, subtitles_default=True)
+    app.start()
+    assert app.subtitles_visible is True
+    assert player.subtitles_visible is True
+
+
+def test_closing_admin_mode_uses_the_full_canvas_without_the_4x3_pillarbox_filter(tmp_path):
+    # UKE-29 real-hardware feedback: the admin UI used to be confined to the
+    # 960px-wide 4:3 "tube" every actual show plays in. The background image
+    # bypasses that filter (use_frame_filter=False) so it fills the whole
+    # widescreen canvas edge to edge instead.
+    from PIL import Image
+
+    from nostalgiabox import thumbnails
+
+    assets_dir = tmp_path / "assets"
+    thumbs_dir = assets_dir / thumbnails.THUMBS_SUBDIR
+    thumbs_dir.mkdir(parents=True)
+    Image.new("RGB", (thumbnails.GRID_W, thumbnails.GRID_H), (20, 20, 20)).save(
+        thumbs_dir / thumbnails.GRID_FILENAME, quality=88
+    )
+    app, player, _ = build_app(tmp_path, assets_dir=assets_dir)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    assert player.looping is not None
+    assert player.loop_frame_filter[player.looping] is False
+
+
+def test_admin_grid_scrolls_when_the_cursor_reaches_a_row_below_the_fold(tmp_path):
+    # UKE-29: enough shows that the Shows section alone wraps onto multiple
+    # rows and overflows one screen (see thumbnails.admin_section_layout /
+    # scrollable_content_height) - walking the cursor down into it should
+    # scroll the grid and reload the background at the new position.
+    from PIL import Image
+
+    from nostalgiabox import thumbnails
+
+    for i in range(10):
+        make_show(tmp_path, f"show{i}", 1)
+    channels = [
+        {"number": 2 + i, "name": f"Show {i}", "path": str(tmp_path / f"show{i}")} for i in range(10)
+    ]
+    assets_dir = tmp_path / "assets"
+    thumbs_dir = assets_dir / thumbnails.THUMBS_SUBDIR
+    thumbs_dir.mkdir(parents=True)
+
+    app, player, _ = build_app(tmp_path, assets_dir=assets_dir, channels=channels)
+    height = max(thumbnails.GRID_H, thumbnails.scrollable_content_height(list(app.lineup)))
+    # A vertical gradient (not a flat colour) - different crop offsets must
+    # produce visibly different pixels, otherwise "did it re-crop" can't
+    # actually be observed from the output bytes. Built as a 1px column and
+    # stretched, which is much faster than pasting per-row.
+    column = Image.new("L", (1, height))
+    column.putdata([y % 256 for y in range(height)])
+    gradient = column.resize((thumbnails.GRID_W, height)).convert("RGB")
+    gradient.save(thumbs_dir / thumbnails.GRID_FILENAME, quality=88)
+    app.start()
+
+    send(app, Action.ADMIN_TOGGLE)
+    assert app._scroll_y == 0
+    # crop_viewport always (re)writes the same fixed filename, so identity
+    # isn't a useful signal here - snapshot its bytes instead to confirm a
+    # fresh crop was actually written at the new scroll position.
+    viewport_path = thumbs_dir / thumbnails.VIEWPORT_FILENAME
+    unscrolled_bytes = viewport_path.read_bytes()
+
+    # Volume Up/Down walks through the (now multi-row) Shows section - by
+    # the last tile the grid must have scrolled to keep it visible.
+    for _ in range(9):
+        send(app, Action.VOLUME_UP)
+    assert app._browse_number == 11  # last of the 10 shows (numbers 2..11)
+    scrolled_y = app._scroll_y
+    assert scrolled_y > 0
+    assert viewport_path.read_bytes() != unscrolled_bytes  # re-cropped at the new offset
+
+    # And scrolling back up to the first tile scrolls back up close to the
+    # top - not necessarily to exactly 0, since the first row sits just
+    # below the "Shows" section label, not right at the very top edge.
+    for _ in range(9):
+        send(app, Action.VOLUME_DOWN)
+    assert app._browse_number == 2
+    assert app._scroll_y < scrolled_y
 
 
 # -- games: admin-mode arcade via RetroArch (UKE-28) -------------------------
@@ -877,7 +1144,7 @@ def test_show_episodes_still_exit_admin_browsing_normally(tmp_path):
     send(app, Action.MUTE)  # confirm an episode
     assert not app.admin_episode_browsing
     assert not app.admin_browsing
-    assert app.admin_mode
+    assert not app.admin_mode
     assert player.current is not None
 
 
@@ -1188,7 +1455,7 @@ def test_channel_down_walks_through_every_present_section(tmp_path):
     app.start()
     _seed_in_progress(app, ws, 3)
     send(app, Action.ADMIN_TOGGLE)
-    assert app._section_keys() == ["continue", "shows", "games", "insights"]
+    assert app._section_keys() == ["continue", "shows", "games", "insights", "adult_toggle"]
     assert app._current_section() == "shows"  # opening always lands on the grid, not the row
 
     send(app, Action.CHANNEL_UP)
@@ -1205,7 +1472,9 @@ def test_channel_down_walks_through_every_present_section(tmp_path):
     send(app, Action.CHANNEL_DOWN)
     assert app._current_section() == "insights"
     send(app, Action.CHANNEL_DOWN)
-    assert app._current_section() == "insights"  # bottommost row - nowhere further down
+    assert app._current_section() == "adult_toggle"
+    send(app, Action.CHANNEL_DOWN)
+    assert app._current_section() == "adult_toggle"  # bottommost row - nowhere further down
 
 
 def test_volume_wraps_within_the_games_row(tmp_path):
