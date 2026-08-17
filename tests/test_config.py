@@ -277,6 +277,34 @@ def test_games_section_parsed(tmp_path):
     assert cfg.games[1].extensions == (".cue",)
 
 
+def test_games_section_expands_tilde_in_core_path(tmp_path, monkeypatch):
+    # A real-hardware bug: config.example.yaml's own PS1 example uses
+    # "~/.config/retroarch/cores/..." for `core`, matching how `path` is
+    # written elsewhere - but `path` gets expanduser'd (_as_path) and `core`
+    # didn't, so a literal "~" was passed straight through subprocess (no
+    # shell - see app.py's _default_game_launcher) to RetroArch, which fails
+    # with a cryptic "init_libretro_symbols()" rather than a clear "no such
+    # file" error. `core` must expand "~" the same way `path` does.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    make_show(tmp_path, "ps1", 1, ext=".cue")
+    data = {
+        **_base_channels(tmp_path),
+        "games": {
+            "systems": [
+                {
+                    "name": "PS1",
+                    "path": str(tmp_path / "ps1"),
+                    "core": "~/.config/retroarch/cores/pcsx_rearmed_libretro.so",
+                    "extensions": [".cue"],
+                },
+            ]
+        },
+    }
+    cfg = config_from_dict(data)
+    assert cfg.games[0].core == str(tmp_path / ".config/retroarch/cores/pcsx_rearmed_libretro.so")
+    assert "~" not in cfg.games[0].core
+
+
 def test_games_section_explicit_number(tmp_path):
     make_show(tmp_path, "snes", 1, ext=".sfc")
     data = {

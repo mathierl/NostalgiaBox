@@ -300,7 +300,14 @@ def _parse_games(raw: Any, base: Optional[Path], *, start_number: int) -> tuple[
                 name=str(name),
                 path=_as_path(entry["path"], base),
                 kind="game",
-                core=str(entry["core"]),
+                # expanduser to match `path` (_as_path) below - core.example.yaml's
+                # own PS1 example uses "~/..." for the core, and RetroArch is
+                # launched via subprocess with no shell (see app.py's
+                # _default_game_launcher), so nothing else would ever expand
+                # a literal "~" - it fails with "init_libretro_symbols()"
+                # instead, which looks like a broken/missing core rather than
+                # an unexpanded path.
+                core=os.path.expanduser(str(entry["core"])),
                 extensions=extensions,
             )
         )
