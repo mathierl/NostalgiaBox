@@ -17,6 +17,7 @@ def build_app(
     player_factory=None,
     watch_state=None,
     admin_ui_launcher=None,
+    drm_handoff_delay=0.0,
     **overrides,
 ):
     for name in ("dragon", "arthur", "rugrats"):
@@ -46,6 +47,7 @@ def build_app(
         player_factory=player_factory,
         watch_state=watch_state,
         admin_ui_launcher=admin_ui_launcher,
+        drm_handoff_delay=drm_handoff_delay,
     )
     return app, player, clock
 
@@ -748,6 +750,46 @@ def test_admin_insights_viewing_blocks_channel_and_volume_actions_from_touching_
     assert player.volume == volume_before
     assert player.muted == muted_before
     assert app.admin_insights_viewing  # none of those actions closed the screen either
+
+
+def test_drm_handoff_delay_pauses_between_mpv_and_browser_ownership_of_the_display(tmp_path, monkeypatch):
+    # Real-hardware regression (UKE-29): cage's wlroots backend repeatedly
+    # failed to claim the display and the whole process segfaulted, most
+    # likely because mpv.terminate() returning doesn't guarantee the
+    # underlying DRM/GBM teardown is actually done yet. drm_handoff_delay is
+    # the mitigation - a brief pause on each mpv<->browser ownership swap.
+    from tests.helpers import make_admin_ui_launcher
+
+    launcher, calls, _ = make_admin_ui_launcher()
+    sleeps = []
+    monkeypatch.setattr("nostalgiabox.app.time.sleep", lambda s: sleeps.append(s))
+    app, player, _ = build_app(
+        tmp_path,
+        admin_ui_launcher=launcher,
+        player_factory=MockPlayer,
+        drm_handoff_delay=0.5,
+    )
+    app.start()
+
+    send(app, Action.ADMIN_TOGGLE)  # mpv -> browser: one pause, after player.close()
+    assert sleeps == [0.5]
+    assert calls  # the browser actually got launched
+
+    send(app, Action.ADMIN_TOGGLE)  # browser -> mpv: another pause, before rebuilding mpv
+    assert sleeps == [0.5, 0.5]
+
+
+def test_drm_handoff_delay_defaults_to_no_pause(tmp_path, monkeypatch):
+    # The default (used by every other test, and by dry-run) - there's no
+    # real DRM device to race over, and a real sleep would only slow things
+    # down for no benefit.
+    sleeps = []
+    monkeypatch.setattr("nostalgiabox.app.time.sleep", lambda s: sleeps.append(s))
+    app, player, _ = build_app(tmp_path, player_factory=MockPlayer)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.ADMIN_TOGGLE)
+    assert sleeps == []
 
 
 def test_admin_toggle_ignored_while_in_standby(tmp_path):

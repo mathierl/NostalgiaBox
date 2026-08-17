@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import queue
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Callable, List, Optional
@@ -191,6 +192,7 @@ class TVApp:
         watch_state: Optional[WatchState] = None,
         admin_ui_launcher: Optional[Callable[[str], object]] = None,
         admin_server: Optional["AdminServer"] = None,
+        drm_handoff_delay: float = 0.0,
     ) -> None:
         self.config = config
         self.player = player
@@ -218,6 +220,17 @@ class TVApp:
         self._admin_server = admin_server
         self._admin_ui_launcher = admin_ui_launcher or _noop_admin_ui_launcher
         self._admin_ui_process: Optional[object] = None
+        # A brief pause between mpv releasing the display and cage/Chromium
+        # claiming it (UKE-29): mpv.terminate() returns once its core thread
+        # has shut down, but the DRM/GBM teardown underneath can lag a beat
+        # behind that signal - on real hardware this showed up as cage's
+        # wlroots backend repeatedly failing to commit a KMS modeset
+        # ("Swapchain for output ... failed test", dozens of times in under a
+        # second) followed by the whole process segfaulting. 0 for
+        # dry-run/tests (where there's no real DRM device to race over, and
+        # a real sleep would only slow the suite down) - from_config sets a
+        # real value for actual hardware.
+        self._drm_handoff_delay = drm_handoff_delay
 
         self.lineup: ChannelLineup = build_lineup(config)
         # Game systems (see UKE-28): shown in the admin browse grid alongside
@@ -350,6 +363,7 @@ class TVApp:
             player_factory=player_factory,
             watch_state=watch_state,
             admin_ui_launcher=_default_admin_ui_launcher,
+            drm_handoff_delay=0.0 if dry_run else 0.5,
         )
         # Attached after construction since the server's state_provider is a
         # bound method of app itself - only actually called once the browser
@@ -745,6 +759,8 @@ class TVApp:
             self._admin_server.start()  # idempotent - no-op if already running
         url = self._admin_server.url if self._admin_server is not None else "about:blank"
         self.player.close()
+        if self._drm_handoff_delay > 0:
+            time.sleep(self._drm_handoff_delay)
         try:
             process = self._admin_ui_launcher(url)
         except Exception:  # noqa: BLE001
@@ -790,6 +806,11 @@ class TVApp:
         """
         if self._player_factory is None:
             return
+        if self._drm_handoff_delay > 0:
+            # Same DRM-release race as _open_admin_ui, in the other
+            # direction: give cage/Chromium a moment to actually let go of
+            # the display before mpv tries to claim it back.
+            time.sleep(self._drm_handoff_delay)
         self.player = self._player_factory()
         self.player.on_end = self._ended.put
         self.player.set_volume(self.volume)
@@ -1414,8 +1435,44 @@ class TVApp:
         return self._resolve_asset(filename)
 
 
+def _suppress_console_echo() -> None:
+    """On real hardware, stop the kernel VT from echoing raw keystrokes onto
+    the screen (UKE-29).
+
+    All real input comes through evdev (see input/keyboard.py) - nothing
+    reads stdin - but the service's stdin is still wired to the physical
+    console (``StandardInput=tty`` + ``TTYPath=/dev/tty1`` in
+    nostalgiabox.service, needed so the process owns that VT for DRM/KMS).
+    A VT's own keyboard-to-tty line discipline keeps echoing typed
+    characters to the screen regardless of that - it's a completely
+    separate path from evdev, so evdev's own ``keyboard_grab`` option has no
+    effect on it. Confirmed on real hardware: every physical keypress
+    briefly flashed a literal "a" (etc.) on the TV, most visibly during the
+    gap between mpv releasing the display and the admin browser claiming it
+    (see _open_admin_ui/_reopen_player) - not garbled input, just the
+    console dutifully echoing what it was told to type.
+
+    Best-effort and permanent for the life of the process: TTYReset=yes in
+    the service unit restores the terminal when it stops, so there's
+    nothing to undo here on our end.
+    """
+    try:
+        import termios
+
+        if not sys.stdin.isatty():
+            return
+        fd = sys.stdin.fileno()
+        attrs = termios.tcgetattr(fd)
+        attrs[3] &= ~(termios.ECHO | termios.ICANON)  # lflags
+        termios.tcsetattr(fd, termios.TCSANOW, attrs)
+    except Exception:  # noqa: BLE001 - cosmetic; never worth failing startup over
+        log.debug("could not suppress console echo", exc_info=True)
+
+
 def run_from_config(config: Config, *, dry_run: bool = False) -> None:
     """Convenience entry point used by the CLI."""
+    if not dry_run:
+        _suppress_console_echo()
     app = TVApp.from_config(config, dry_run=dry_run)
     app.run()
 
