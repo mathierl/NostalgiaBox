@@ -30,6 +30,14 @@ StandardInput=tty
 TTYPath=/dev/tty1
 TTYReset=yes
 TTYVHangup=yes
+# Log output goes to the journal (not the tty) so `journalctl -u nostalgiabox`
+# actually captures crashes - without this, StandardOutput/StandardError
+# default to "inherit" from StandardInput (tty), meaning every log line only
+# ever flashes on the physical screen and is gone once it scrolls off. This
+# does not affect DRM/console ownership, which comes from StandardInput/
+# TTYPath, not from where stdout/stderr go.
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
