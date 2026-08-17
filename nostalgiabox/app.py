@@ -466,6 +466,21 @@ class TVApp:
         if self.admin_browsing:
             self._move_browse_cursor(drow=-1)
             return
+        if self.admin_insights_viewing:
+            # Read-only screen - nothing to move/change, and critically:
+            # mpv is closed the whole time the browser admin UI is up (see
+            # _open_admin_ui), same as on the grid/episode list, so falling
+            # through to the normal channel-change below would drive an
+            # already-terminated mpv instance (the exact crash class fixed
+            # elsewhere in UKE-29 for episode/continue selection).
+            return
+        if self.admin_mode:
+            # Once something's actually playing in admin mode (the small
+            # corner panel, not a browse screen), Channel Up/Down are
+            # repurposed into seek - a grown-up-only control, same spirit as
+            # Mute becoming pause/play here.
+            self._seek(self.config.admin_seek_seconds)
+            return
         self._remember_position()
         self._last_channel_number = self.lineup.current.number
         self.lineup.up()
@@ -478,10 +493,31 @@ class TVApp:
         if self.admin_browsing:
             self._move_browse_cursor(drow=1)
             return
+        if self.admin_insights_viewing:
+            return
+        if self.admin_mode:
+            self._seek(-self.config.admin_seek_seconds)
+            return
         self._remember_position()
         self._last_channel_number = self.lineup.current.number
         self.lineup.down()
         self.tune_current()
+
+    def _seek(self, delta: float) -> None:
+        """Skip forward (positive) or backward (negative) within the
+        currently playing episode - admin mode only (see _channel_up/
+        _channel_down), a grown-up-only control the kid-facing remote never
+        exposes. Shows the resulting position as a brief OSD message so the
+        grown-up gets feedback even though there's no visible seek bar.
+        """
+        self.player.seek(delta)
+        arrow = "»" if delta >= 0 else "«"  # » forward / « backward
+        label = f"{arrow} {abs(delta):.0f}s"
+        pos = self.player.get_time_pos()
+        if pos is not None:
+            minutes, seconds = divmod(max(0, int(pos)), 60)
+            label += f"  ({minutes}:{seconds:02d})"
+        self.overlay.show_message(label)
 
     def _jump_last_channel(self) -> None:
         if self._last_channel_number is None:
@@ -577,11 +613,18 @@ class TVApp:
         if self.admin_browsing:
             self._move_browse_cursor(dcol=1)
             return
+        if self.admin_insights_viewing:
+            # Read-only screen, and mpv is closed while it's up - see the
+            # matching guard in _channel_up for why this must not fall
+            # through to touching self.player.
+            return
         self._set_volume(self.volume + self.config.volume_step, unmute=True)
 
     def _volume_down(self) -> None:
         if self.admin_browsing:
             self._move_browse_cursor(dcol=-1)
+            return
+        if self.admin_insights_viewing:
             return
         # One press below zero cleanly powers off the box (safe to unplug).
         if self.config.power_off_on_min_volume and not self.muted and self.volume <= 0:
@@ -636,6 +679,11 @@ class TVApp:
                 self._confirm_insights_selection()
             else:
                 self._confirm_show_selection()
+            return
+        if self.admin_insights_viewing:
+            # Read-only screen - Power is the only thing that does anything
+            # here (see _admin_back_from_insights); mpv is closed the whole
+            # time it's up, same reasoning as the guards above.
             return
         if self.admin_mode:
             self._toggle_pause()

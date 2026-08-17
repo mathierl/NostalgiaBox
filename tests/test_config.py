@@ -208,6 +208,7 @@ def test_admin_mode_defaults(tmp_path):
     cfg = config_from_dict(data)
     assert cfg.admin_mode_enabled is True
     assert cfg.admin_hold_seconds == 3.0
+    assert cfg.admin_seek_seconds == 10.0
 
 
 def test_admin_mode_can_be_disabled_and_hold_seconds_clamped(tmp_path):
@@ -220,6 +221,20 @@ def test_admin_mode_can_be_disabled_and_hold_seconds_clamped(tmp_path):
     cfg = config_from_dict(data)
     assert cfg.admin_mode_enabled is False
     assert cfg.admin_hold_seconds == 15.0  # clamped to the max
+
+
+def test_admin_seek_seconds_clamped(tmp_path):
+    make_show(tmp_path, "a", 1)
+    data = {
+        "admin_seek_seconds": 1000,
+        "channels": [{"path": str(tmp_path / "a")}],
+    }
+    cfg = config_from_dict(data)
+    assert cfg.admin_seek_seconds == 300.0  # clamped to the max
+
+    data["admin_seek_seconds"] = 0.1
+    cfg = config_from_dict(data)
+    assert cfg.admin_seek_seconds == 1.0  # clamped to the min
 
 
 # -- games (admin mode arcade, UKE-28) --------------------------------------

@@ -88,6 +88,13 @@ class Player(ABC):
         pause (see :class:`MpvPlayer`) override it.
         """
 
+    def seek(self, delta: float) -> None:
+        """Skip forward (positive) or backward (negative) by ``delta``
+        seconds within the current item (used by the admin view only - see
+        TVApp._seek). The default implementation is a no-op; players that
+        can actually seek (see :class:`MpvPlayer`) override it.
+        """
+
     @abstractmethod
     def get_time_pos(self) -> Optional[float]:
         """Current playback position in seconds, or None if nothing is playing."""
@@ -335,6 +342,12 @@ class MpvPlayer(Player):
         except Exception:  # noqa: BLE001
             log.debug("could not set pause", exc_info=True)
 
+    def seek(self, delta: float) -> None:
+        try:
+            self._mpv.command("seek", delta, "relative")
+        except Exception:  # noqa: BLE001
+            log.debug("seek failed", exc_info=True)
+
     def get_time_pos(self) -> Optional[float]:
         try:
             pos = self._mpv.time_pos
@@ -463,6 +476,12 @@ class MockPlayer(Player):
     def set_pause(self, paused: bool) -> None:
         self.paused = bool(paused)
         self._log(f"PAUSE {self.paused}")
+
+    def seek(self, delta: float) -> None:
+        if self.current is None:
+            return
+        self.time_pos = max(0.0, self.time_pos + delta)
+        self._log(f"SEEK {delta:+.1f}s -> {self.time_pos:.1f}s")
 
     def get_time_pos(self) -> Optional[float]:
         return self.time_pos if self.current is not None else None

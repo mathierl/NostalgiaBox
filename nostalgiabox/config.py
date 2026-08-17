@@ -168,6 +168,11 @@ class Config:
     # grown-ups; the kid-facing remote experience is unchanged either way.
     admin_mode_enabled: bool = True
     admin_hold_seconds: float = 3.0  # how long to hold power to trigger it
+    # Once something's actually playing in admin mode (not browsing), Channel
+    # Up/Down are repurposed from channel-surfing into seek forward/backward
+    # by this many seconds - a grown-up-only control the kid-facing remote
+    # never exposes (UKE-29).
+    admin_seek_seconds: float = 10.0
 
     def channel_numbers(self) -> List[int]:
         return [c.number for c in self.channels]
@@ -430,6 +435,9 @@ def config_from_dict(data: Dict[str, Any], *, base_dir: Optional[Path] = None) -
         admin_mode_enabled=bool(data.get("admin_mode_enabled", True)),
         admin_hold_seconds=_clamp_float(
             data.get("admin_hold_seconds", 3.0), 0.5, 15.0, "admin_hold_seconds"
+        ),
+        admin_seek_seconds=_clamp_float(
+            data.get("admin_seek_seconds", 10.0), 1.0, 300.0, "admin_seek_seconds"
         ),
     )
 

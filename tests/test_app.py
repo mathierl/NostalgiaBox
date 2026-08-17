@@ -684,16 +684,70 @@ def test_exiting_admin_mode_unpauses_and_clears_panel(tmp_path):
 
 
 def test_changing_channel_while_watching_unpauses_and_refreshes_panel(tmp_path):
-    app, player, _ = build_app(tmp_path)
+    # bridge_seconds=0: channel bug appears immediately instead of waiting on
+    # the (pending) cut-over deadline, keeping this test's assertion simple.
+    app, player, _ = build_app(tmp_path, bridge_seconds=0)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.MUTE)  # confirm show
     send(app, Action.MUTE)  # confirm episode -> watching channel 2
     send(app, Action.MUTE)  # pause
     assert app.paused
-    send(app, Action.CHANNEL_UP)  # normal channel change now that we're watching
+    # Channel Up/Down now seeks while admin_mode is on (see the seek tests
+    # below) - a real channel change needs to leave admin mode first.
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.CHANNEL_UP)
     assert not app.paused  # fresh channel: no longer paused
-    assert "CH 03" in player.overlays.get(5, "") or "> CH 03" in player.overlays.get(5, "")
+    assert "CH 03" in player.overlays.get(1, "")  # channel bug confirms the real change
+
+
+def test_channel_up_down_seek_instead_of_changing_channel_while_watching_in_admin_mode(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm show
+    send(app, Action.MUTE)  # confirm episode -> watching channel 2, still in admin mode
+    assert app.admin_mode
+    assert player.time_pos == 0.0
+    send(app, Action.CHANNEL_UP)
+    assert player.time_pos == app.config.admin_seek_seconds
+    assert app.lineup.current.number == 2  # channel itself never changed
+    send(app, Action.CHANNEL_DOWN)
+    send(app, Action.CHANNEL_DOWN)
+    assert player.time_pos == 0.0  # clamped, doesn't go negative
+    assert app.lineup.current.number == 2
+
+
+def test_seek_shows_an_osd_message_with_the_new_position(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm show
+    send(app, Action.MUTE)  # confirm episode
+    send(app, Action.CHANNEL_UP)
+    message = player.overlays.get(4, "")  # message overlay slot
+    assert "»" in message or "10" in message
+
+
+def test_admin_insights_viewing_blocks_channel_and_volume_actions_from_touching_the_player(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    _walk_to_insights(app)
+    send(app, Action.MUTE)  # confirm -> opens insights
+    assert app.admin_insights_viewing
+    time_pos_before = player.time_pos
+    volume_before = player.volume
+    muted_before = player.muted
+    send(app, Action.CHANNEL_UP)
+    send(app, Action.CHANNEL_DOWN)
+    send(app, Action.VOLUME_UP)
+    send(app, Action.VOLUME_DOWN)
+    send(app, Action.MUTE)
+    assert player.time_pos == time_pos_before
+    assert player.volume == volume_before
+    assert player.muted == muted_before
+    assert app.admin_insights_viewing  # none of those actions closed the screen either
 
 
 def test_admin_toggle_ignored_while_in_standby(tmp_path):

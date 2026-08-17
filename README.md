@@ -280,9 +280,13 @@ admin mode; nothing is interrupted just by looking around.
 Once you've confirmed an episode and the browser has closed, **Mute** switches
 roles again and becomes **pause/play** - a control the kid-facing remote never
 exposes, since a small kid pausing the TV mid-show tends to end in tears.
-**Channel Up/Down** also switches back to changing the channel immediately
-(as normal) once you're out of the browser. To browse again, hold Power to
-close admin mode, then hold it again to reopen the grid.
+**Channel Up/Down** also switches roles: instead of changing the channel, it
+skips forward/backward within the current episode by `admin_seek_seconds`
+(default `10.0`) - a grown-up-only scrub control, shown as a "»"/"«" OSD
+message with the resulting position. To actually change the channel again,
+hold Power to close admin mode first - Channel Up/Down goes back to normal
+once you're out. To browse again, hold Power to close admin mode, then hold
+it again to reopen the grid.
 
 A couple of notes:
 
@@ -298,6 +302,8 @@ A couple of notes:
 - Turn it off entirely with `admin_mode_enabled: false` in `config.yaml`, or
   change how long the hold needs to be with `admin_hold_seconds` (default
   `3.0`).
+- Change the seek skip size with `admin_seek_seconds` (default `10.0`,
+  1-300).
 - In `--dry-run` dev mode on a laptop keyboard, press **a** instead of timing
   a hold.
 

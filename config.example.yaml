@@ -137,6 +137,10 @@ scan_recursive: true      # also look inside season sub-folders for episodes
 # `nostalgiabox --check` (via ffmpeg) - nothing to configure for that.
 admin_mode_enabled: true    # set false to remove the feature entirely
 admin_hold_seconds: 3.0     # how long to hold Power to trigger it (0.5-15)
+# Once something's playing in admin mode (not browsing), Channel Up/Down
+# skip forward/backward by this many seconds instead of changing channels -
+# a grown-up-only seek control (1-300).
+admin_seek_seconds: 10.0
 
 # --- Games (optional) ---------------------------------------------------------
 # Emulated game systems, launched via RetroArch, browsed the same way as
