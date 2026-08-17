@@ -62,7 +62,13 @@
 
   .footer { position: absolute; left: 0; right: 0; bottom: 22px; text-align: center; font-size: 14px; color: #6f6f6f; letter-spacing: 0.3px; }
 
-  #detail { position: absolute; inset: 0; background: #141414; padding: 40px 64px; display: none; }
+  /* z-index:10 is deliberate, not decorative: .card.focused below sets its
+     own z-index:5, which (since it's an explicit value, not auto) paints
+     above any *unset*-z-index positioned element regardless of DOM order -
+     without this, a focused grid card was bleeding through on top of the
+     episode list (confirmed on real hardware: a small floating poster tile
+     sitting on top of the detail view). */
+  #detail { position: absolute; inset: 0; z-index: 10; background: #141414; padding: 40px 64px; display: none; }
   #detail.open { display: block; }
   .back-hint { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: #8a8a8a; margin-bottom: 20px; }
   .detail-header { font-size: 26px; font-weight: 700; margin: 0 0 4px 0; }
@@ -169,6 +175,10 @@ function renderGrid(state) {
 
 function renderEpisodeList(data) {
   detail.classList.add("open");
+  // Belt-and-braces alongside #detail's z-index fix above: also drop the
+  // grid's own content while it's not showing, so there's nothing left
+  // underneath to ever bleed through regardless of future CSS changes.
+  grid.innerHTML = "";
   document.getElementById("detailTitle").textContent = data.channel_name || "";
   var verb = data.kind === "game" ? "Select a game" : "Select an episode";
   var sub = data.total <= 1 ? verb : verb + "  •  " + (data.highlight_index + 1) + " of " + data.total;
@@ -206,10 +216,25 @@ function render(state) {
   }
 }
 
+// render() used to run unconditionally on every poll (~8x/sec) - a full
+// grid.innerHTML rebuild (every card element, every poster's background-image
+// re-set from scratch) even when the cursor hadn't moved and nothing had
+// actually changed. On a Pi's constrained CPU that's enough continuous
+// rebuild/reflow/repaint work to show up as visible stutter, which is what
+// was reported after testing on real hardware (UKE-29). The state itself
+// only actually changes when a button is pressed or watch-state updates -
+// far less than 8x/sec - so skip the rebuild entirely when the incoming
+// JSON is byte-identical to what's already on screen.
+var lastStateJSON = null;
+
 function poll() {
   fetch("/state", { cache: "no-store" })
-    .then(function(r) { return r.json(); })
-    .then(render)
+    .then(function(r) { return r.text(); })
+    .then(function(text) {
+      if (text === lastStateJSON) return; // nothing changed - skip the rebuild
+      lastStateJSON = text;
+      render(JSON.parse(text));
+    })
     .catch(function() { /* transient - next poll will retry */ });
 }
 

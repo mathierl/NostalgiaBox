@@ -433,6 +433,87 @@ def test_mute_confirms_episode_and_plays_it(tmp_path):
     assert "Select an episode" not in player.overlays.get(5, "")
 
 
+def test_confirming_an_episode_gets_a_live_player_back_first(tmp_path):
+    # Regression test for a real crash found on hardware (UKE-29): mpv is
+    # closed the whole time the browser admin UI is up (see _open_admin_ui),
+    # so confirming an episode has to close that browser and get a fresh
+    # mpv back *before* touching self.player - driving an already-terminated
+    # mpv instance is unsafe and was taking the whole process down. With
+    # MockPlayer this wouldn't show up as a crash (it doesn't simulate that),
+    # so this asserts the actual close/reopen sequence happened instead:
+    # a brand new player instance backs app.player, and the channel-bug
+    # overlay lands on *that* one, not the closed original.
+    from tests.helpers import make_admin_ui_launcher
+
+    created = []
+
+    def factory():
+        p = MockPlayer()
+        created.append(p)
+        return p
+
+    launcher, calls, processes = make_admin_ui_launcher()
+    app, player1, _ = build_app(tmp_path, player_factory=factory, admin_ui_launcher=launcher)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    assert player1.closed is True
+    # player1 was already playing (from app.start()) and already had a
+    # channel-bug overlay set before admin mode was even entered - capture
+    # that baseline so we can assert it's untouched afterward, rather than
+    # wrongly expecting a closed player to still read as blank.
+    player1_current_before = player1.current
+    player1_overlay_count_before = len(player1.overlays)
+    send(app, Action.MUTE)  # Dragon Tales episode list
+    send(app, Action.MUTE)  # confirm episode 0
+
+    assert processes[0].terminated is True  # the browser admin UI was closed
+    assert len(created) == 1
+    assert app.player is created[0]
+    assert app.player is not player1
+    assert app.player.current is not None  # played on the new instance
+    # the old, closed player was never touched again - no new play() call,
+    # no new overlay call landed on it (the overlay must have been
+    # repointed too, see OverlayManager.rebind_player, or the channel bug
+    # etc. would keep silently going to the dead player forever).
+    assert player1.current == player1_current_before
+    assert len(player1.overlays) == player1_overlay_count_before
+    assert 1 in app.player.overlays  # channel-bug overlay id, on the new player
+
+
+def test_confirming_a_continue_entry_gets_a_live_player_back_first(tmp_path):
+    # Same bug, same fix, the other path that plays something directly from
+    # admin mode without going through the episode list (UKE-29).
+    from tests.helpers import make_admin_ui_launcher
+
+    created = []
+
+    def factory():
+        p = MockPlayer()
+        created.append(p)
+        return p
+
+    launcher, calls, processes = make_admin_ui_launcher()
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player1, _ = build_app(
+        tmp_path, watch_state=ws, player_factory=factory, admin_ui_launcher=launcher
+    )
+    app.start()
+    episode = _seed_in_progress(app, ws, 3, position=250.0, duration=1200.0)
+    send(app, Action.ADMIN_TOGGLE)
+    assert player1.closed is True
+    player1_current_before = player1.current
+    send(app, Action.CHANNEL_UP)  # onto the continue row
+    assert app._browse_continue_index == 0
+    send(app, Action.MUTE)  # confirm - resumes immediately
+
+    assert processes[0].terminated is True
+    assert len(created) == 1
+    assert app.player is created[0]
+    assert app.player is not player1
+    assert app.player.current == episode
+    assert player1.current == player1_current_before  # the old, closed player untouched
+
+
 def test_power_backs_out_of_episode_list_to_grid(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()

@@ -698,6 +698,12 @@ class TVApp:
         self.player.on_end = self._ended.put
         self.player.set_volume(self.volume)
         self.player.set_mute(self.muted)
+        # self.overlay was built once around the original player (see
+        # __init__) - without repointing it here it would keep silently
+        # driving the old, terminated mpv instance forever after the first
+        # reopen (see OverlayManager.rebind_player's docstring for why this
+        # doesn't crash, just goes quietly dead).
+        self.overlay.rebind_player(self.player)
 
     def _refresh_admin_panel(self) -> None:
         if not self.admin_mode:
@@ -955,6 +961,13 @@ class TVApp:
         entry = self._continue_entries[index]
         self.admin_browsing = False
         self._browse_continue_index = None
+        # mpv was closed when admin mode was entered (see _open_admin_ui) -
+        # get it back (and close the browser showing the grid) before
+        # touching self.player, or this drives an already-terminated mpv
+        # instance, which is unsafe and can take the whole process down
+        # (confirmed on real hardware, UKE-29).
+        self._close_admin_ui()
+        self._reopen_player()
         self._play_specific_episode(entry.channel_number, entry.episode_path, start=entry.resume_position)
         self._pre_admin_path = None  # something new is playing; nothing to resume
         self._browse_number = self.lineup.current.number
@@ -991,6 +1004,12 @@ class TVApp:
         self.admin_episode_browsing = False
         if has_selection:
             episode_path = channel.episodes[self._browse_episode_index]
+            # Same as _confirm_continue_selection: mpv is closed while the
+            # browser admin UI is up, so get it back before playing anything
+            # (see that method's comment - this was the actual crash
+            # reported on real hardware when picking an episode, UKE-29).
+            self._close_admin_ui()
+            self._reopen_player()
             self._play_specific_episode(channel.number, episode_path)
             self._pre_admin_path = None  # something new is playing; nothing to resume
         self._browse_number = self.lineup.current.number

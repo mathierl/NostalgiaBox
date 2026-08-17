@@ -79,6 +79,20 @@ class OverlayManager:
         # overlay id -> wall time (monotonic) at which it should disappear.
         self._expiry: Dict[int, float] = {}
 
+    def rebind_player(self, player: Player) -> None:
+        """Point future overlay calls at a newly (re)created Player instance.
+
+        TVApp._reopen_player() swaps in a fresh mpv instance after admin
+        mode or a game hands the display back (the old one was already
+        terminated - see Player.close()). Without calling this too, every
+        overlay method below would keep silently talking to that dead
+        instance for the rest of the process's life: MpvPlayer's overlay
+        calls all swallow exceptions internally (see player.py), so nothing
+        crashes - the channel bug, volume bar, and admin corner panel just
+        silently stop appearing after the first admin-mode/game cycle.
+        """
+        self._player = player
+
     # -- public API ---------------------------------------------------------
     def show_channel_bug(
         self, number: int, name: str, *, duration: Optional[float] = None
