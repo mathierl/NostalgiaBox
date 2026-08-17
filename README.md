@@ -270,11 +270,13 @@ row. It's a two-step browser:
 1. **Show grid.** **Channel Up/Down** moves the selection up/down a row,
    **Volume Up/Down** moves it left/right within a row, scrolling as needed
    to keep the highlight on screen (this is just navigation - nothing
-   changes yet). Below the real channels/games sit two rows that are always
-   there regardless of what's configured: **Watch Insights** (see below) and
-   an **Adult Mode** toggle. **Mute** confirms whatever's highlighted - a
-   show opens its episode list, Insights opens the stats screen, and the
-   Adult Mode row flips it on/off with a brief on-screen confirmation.
+   changes yet). Below the real channels sit two rows that are always there
+   regardless of what's configured: **Watch Insights** (see below) and an
+   **Adult Mode** toggle. **Mute** confirms whatever's highlighted - a show
+   opens its episode list, Insights opens the stats screen, and the Adult
+   Mode row flips it on/off with a brief on-screen confirmation. Once Adult
+   Mode is on, a third row appears below it: **Open RetroArch** (see
+   "Games (arcade)" below).
 2. **Episode list.** A numbered list of every episode in that show, each one
    showing its watch state - "✓ Watched" or "N% watched" for anything
    in progress. **Channel Up/Down** moves the highlighted episode. **Mute**
@@ -336,32 +338,35 @@ A couple of notes:
 
 #### Games (arcade)
 
-If you've configured a `games:` section (see `config.example.yaml`), emulated
-game systems show up as extra tiles in the same show grid, browsed exactly
-the same way - a system (e.g. "SNES") behaves like a channel, and its ROMs
-behave like episodes, right down to the same 2D grid and numbered-list nav.
+Once Adult Mode is on (see above), the grid gets a third row: **Open
+RetroArch**. Confirming it hands the whole screen straight to RetroArch's
+own menu - no channel/ROM picker of NostalgiaBox's own, just plain
+`retroarch` with no arguments, exactly like launching it on any other
+RetroArch setup. From there it's all RetroArch: its own playlists, cores,
+save states, cheats, and settings. Quit back out through RetroArch's own
+menu (F1 by default) and you land right back on the NostalgiaBox grid,
+Adult Mode still on.
 
-The one thing that's different: confirming a ROM doesn't play it inline like
-a video episode. It hands the screen to RetroArch - mpv closes, RetroArch
-runs the game full-screen until you quit it from RetroArch's own menu (F1 by
-default), and you land right back on the same game list, ready to pick
-another one. This needs RetroArch and the relevant libretro core(s) already
-installed on the Pi; NostalgiaBox just launches `retroarch -L <core> <rom>`
-and waits.
+This needs RetroArch (and whatever libretro cores/BIOS files your games
+need) already installed and configured on the Pi - NostalgiaBox doesn't
+manage any of that, it just launches `retroarch` and waits for it to exit.
+Sticking to `retroarch`'s own defaults means anything you can normally do
+in RetroArch (scan a ROM folder into a playlist, add a system, etc.) just
+works here too, without touching `config.yaml` at all.
 
 #### Insights
 
 One of the two evergreen rows at the bottom of the show grid, always present
 regardless of what's configured (see Adult Mode above for the other).
-**Mute** opens a read-only screen: total minutes
-watched, episodes watched, and game sessions played; a "favorite" channel
-(whichever one has the most engagement - watched minutes for shows, play
-count for games); a completion bar per channel/game system; a recent-
-activity feed (most recent first); and, if the favorite happens to be a
-well-known title, a couple of similar-show suggestions as a research
-pointer for restocking the SD card - purely text, nothing gets downloaded
-or added automatically. **Power** backs out to the grid, same as the
-episode list.
+**Mute** opens a read-only screen: total minutes watched and episodes
+watched; a "favorite" channel (whichever one has the most watched minutes);
+a completion bar per channel; a recent-activity feed (most recent first);
+and, if the favorite happens to be a well-known title, a couple of
+similar-show suggestions as a research pointer for restocking the SD card -
+purely text, nothing gets downloaded or added automatically. **Power** backs
+out to the grid, same as the episode list. (Games don't show up here -
+RetroArch's own menu has no way to report back what got played; see "Games
+(arcade)" above.)
 
 ---
 
@@ -397,13 +402,6 @@ admin_hold_seconds: 3.0  # how long to hold Power to open it
 admin_seek_seconds: 10.0 # Adult Mode's Channel Up/Down scrub size, 1-300
 subtitles_default: false # subtitles on/off at boot; toggled via Info in Adult Mode
 audio_device: "..."      # force HDMI audio (see Part H)
-
-games:                   # optional: emulated systems, browsed alongside channels in admin mode
-  systems:
-    - name: SNES
-      path: /media/nostalgiabox-roms/snes
-      core: /path/to/snes9x_libretro.so
-      extensions: [".sfc", ".smc"]
 
 ui:                      # the green on-screen display
   color: "#4DFF5A"
@@ -469,7 +467,7 @@ nostalgiabox/
 ├── input/         remote input (Flirc/keyboard, HDMI-CEC, keymap)
 ├── static_gen.py  ffmpeg-generated static/glitch/colour-bar clips
 ├── thumbnails.py  ffmpeg+Pillow poster grid for the admin-mode UI
-├── watch_state.py per-episode/game watch history, Continue Watching, Insights
+├── watch_state.py per-episode watch history, Continue Watching, Insights
 ├── recommendations.py  curated similar-show suggestions for Insights
 └── app.py         the TV state machine
 ```

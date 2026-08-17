@@ -41,7 +41,7 @@ mpv+ASS UI:
   just wasted 25% of the screen for no reason. :class:`nostalgiabox.player.
   MpvPlayer` bypasses the 4:3 filter for this one image via
   ``play_loop(..., use_frame_filter=False)``.
-* A section (Shows/Games) no longer shrinks its tiles to cram every one into
+* The "Shows" section no longer shrinks its tiles to cram every one into
   a single row - tiles stay a fixed, comfortable size and *wrap* onto
   additional rows within the section instead (:func:`admin_section_layout`).
   Combined with the always-present Continue Watching/Insights/Adult-Mode
@@ -52,6 +52,16 @@ mpv+ASS UI:
   (however tall) is still composed once at ``--check`` time as before, and
   a cheap runtime crop (no ffmpeg, no poster work - just already-decoded
   pixels) produces the single screen's worth mpv actually displays.
+
+Third UKE-29 follow-up: games were dropped as a second "Games" section of
+curated ROM tiles entirely - Adult Mode's grid gets a plain "Open RetroArch"
+row instead (see ``nostalgiabox.app.TVApp._open_retroarch``), handing the
+whole screen to RetroArch's own menu rather than NostalgiaBox maintaining its
+own poster/ROM-list UI for it. That row only ever shows once Adult Mode is
+on, but - like the Adult Mode toggle row before it - its vertical space is
+always reserved in the layout (see ``scrollable_content_height``'s
+``evergreen_rows``), so toggling Adult Mode never requires recomposing the
+background image.
 """
 
 from __future__ import annotations
@@ -86,14 +96,15 @@ GRID_H = 720
 
 # Layout of the poster grid - kept in sync with the section-label/highlight-
 # ring positions overlay.py draws on top, via admin_section_layout() below.
-# Real channels and game systems are grouped into named "Shows"/"Games"
-# swimlanes (UKE-29) - each may wrap onto multiple rows within its section
-# if it has more tiles than comfortably fit at a fixed size on one line (see
-# admin_section_layout) - so the composed image can end up taller than one
-# screen, in which case the app scrolls it (see crop_viewport). This is
-# still safe to bake into the once-per---check background image, unlike the
-# Continue Watching row (see overlay.py): which shows/games exist only
-# changes when the config does, not on every watch.
+# Channels are grouped into a single named "Shows" swimlane (UKE-29 - this
+# used to also have a "Games" swimlane, dropped when games moved to a plain
+# "Open RetroArch" handoff, see the module docstring) - it may wrap onto
+# multiple rows if it has more tiles than comfortably fit at a fixed size on
+# one line (see admin_section_layout) - so the composed image can end up
+# taller than one screen, in which case the app scrolls it (see
+# crop_viewport). This is still safe to bake into the once-per---check
+# background image, unlike the Continue Watching row (see overlay.py): which
+# shows exist only changes when the config does, not on every watch.
 _GRID_MARGIN_X = 56
 # Reserves room for the "Select a channel" header line *and*, below it, the
 # "Continue Watching" text row overlay.py draws (see CONTINUE_LIMIT there).
@@ -114,12 +125,13 @@ _TILE_ROW_GAP = 12  # vertical gap between a section's *wrapped* rows
 _TILE_MAX_W = 260
 _POSTER_ASPECT = 16 / 9
 
-# Height of the two evergreen rows overlay.py draws below the last real
-# section - Watch Insights and the Adult Mode toggle (UKE-29) - neither of
-# which is baked into the background image (like Continue Watching, they're
-# not something --check can know ahead of time... well, Adult Mode's on/off
-# state at least changes live). A shared constant so thumbnails.py's height
-# accounting and overlay.py's row drawing can never drift apart - see
+# Height of one evergreen row overlay.py draws below the last real section -
+# Watch Insights, the Adult Mode toggle, and (once Adult Mode is on) Open
+# RetroArch (UKE-29) - none of which is baked into the background image
+# (like Continue Watching, they're not something --check can know ahead of
+# time... well, Adult Mode's on/off state and whether Open RetroArch is even
+# showing at all least change live). A shared constant so thumbnails.py's
+# height accounting and overlay.py's row drawing can never drift apart - see
 # scrollable_content_height.
 EVERGREEN_ROW_H = 64
 EVERGREEN_GAP_ABOVE = 20
@@ -141,7 +153,7 @@ class SectionTile:
 
 @dataclass(frozen=True)
 class Section:
-    """One named swimlane ("Shows", "Games") and its laid-out tiles."""
+    """One named swimlane ("Shows") and its laid-out tiles."""
 
     title: str
     label_y: int
@@ -173,20 +185,16 @@ def poster_filename(channel: Channel) -> str:
 
 
 def admin_sections(tiles: Sequence[Channel]) -> List[Tuple[str, List[Channel]]]:
-    """Split combined admin tiles (real channels + game systems, in
+    """Wrap ``tiles`` (real channels, in
     :meth:`nostalgiabox.app.TVApp._admin_tiles` order) into the named
-    swimlanes the admin browse screen groups them into - "Shows" then
-    "Games", each only present if it actually has anything in it. A
-    channel's ``config.kind`` is the only thing that decides which lane
-    it's in.
+    swimlane the admin browse screen groups them into - just "Shows" now
+    that games are a plain "Open RetroArch" handoff rather than a second
+    curated section (UKE-29, see the module docstring) - present only if
+    there's actually anything to show.
     """
-    shows = [c for c in tiles if c.config.kind != "game"]
-    games = [c for c in tiles if c.config.kind == "game"]
     sections: List[Tuple[str, List[Channel]]] = []
-    if shows:
-        sections.append(("Shows", shows))
-    if games:
-        sections.append(("Games", games))
+    if tiles:
+        sections.append(("Shows", list(tiles)))
     return sections
 
 
@@ -237,10 +245,10 @@ def tile_bounds(tile: SectionTile) -> Tuple[int, int]:
 
 
 def section_bounds(tiles: Sequence[Channel], title: str) -> Optional[Tuple[int, int]]:
-    """(top, bottom) image-space Y-extent of one named section ("Shows" or
-    "Games") - used by nostalgiabox.app.TVApp._sync_admin_scroll to know
-    what to scroll into view when the browse cursor moves onto that row.
-    ``None`` if there's no such section (e.g. no games configured at all).
+    """(top, bottom) image-space Y-extent of one named section ("Shows") -
+    used by nostalgiabox.app.TVApp._sync_admin_scroll to know what to scroll
+    into view when the browse cursor moves onto that row. ``None`` if
+    there's no such section (e.g. no channels configured at all).
     """
     for section in admin_section_layout(list(tiles)):
         if section.title == title and section.tiles:
@@ -251,9 +259,9 @@ def section_bounds(tiles: Sequence[Channel], title: str) -> Optional[Tuple[int, 
 
 def sections_bottom(tiles: Sequence[Channel]) -> int:
     """Y coordinate just below the last section's last row - i.e. where the
-    evergreen Insights/Adult-Mode rows (drawn by overlay.py, never baked
-    into the background image) start. ``GRID_HEADER_H`` if there are no
-    sections at all (no shows or games configured).
+    evergreen Insights/Adult-Mode/Open-RetroArch rows (drawn by overlay.py,
+    never baked into the background image) start. ``GRID_HEADER_H`` if there
+    are no sections at all (no channels configured).
     """
     bottom = GRID_HEADER_H
     for section in admin_section_layout(list(tiles)):
@@ -262,14 +270,18 @@ def sections_bottom(tiles: Sequence[Channel]) -> int:
     return bottom
 
 
-def scrollable_content_height(tiles: Sequence[Channel], *, evergreen_rows: int = 2) -> int:
+def scrollable_content_height(tiles: Sequence[Channel], *, evergreen_rows: int = 3) -> int:
     """Total height of the scrollable part of the browse screen: every
     section's tiles, plus ``evergreen_rows`` fixed-height rows below them
-    (Watch Insights and the Adult Mode toggle, UKE-29 - see EVERGREEN_ROW_H)
-    and a little footer breathing room. This - not just ``sections_bottom``
-    - is what the composed background image needs to be tall enough to
-    cover (see compose_show_grid) and what the app clamps scrolling against
-    (see crop_viewport).
+    (Watch Insights, the Adult Mode toggle, and Open RetroArch, UKE-29 - see
+    EVERGREEN_ROW_H) and a little footer breathing room. The space for Open
+    RetroArch is reserved even while it isn't showing (Adult Mode off) - the
+    background image is baked once at ``--check`` time (see module
+    docstring) and can't know Adult Mode's live state, so it always leaves
+    room rather than needing to be recomposed every time Adult Mode toggles.
+    This - not just ``sections_bottom`` - is what the composed background
+    image needs to be tall enough to cover (see compose_show_grid) and what
+    the app clamps scrolling against (see crop_viewport).
     """
     bottom = sections_bottom(tiles)
     bottom += evergreen_rows * (EVERGREEN_ROW_H + EVERGREEN_GAP_ABOVE)
@@ -306,12 +318,10 @@ def ensure_channel_poster(
 ) -> Optional[Path]:
     """Return a cached poster for ``channel``, (re)generating it if the
     source episode is newer than the cached poster (or there isn't one yet).
-    Returns None if the channel has no episodes, ffmpeg is unavailable, or
-    it's a game channel (a ROM file isn't something ffmpeg can grab a frame
-    from - compose_show_grid falls back to a plain placeholder tile for
-    these, same as it does for any channel with no poster).
+    Returns None if the channel has no episodes or ffmpeg is unavailable -
+    compose_show_grid falls back to a plain placeholder tile in that case.
     """
-    if channel.is_empty or channel.config.kind == "game":
+    if channel.is_empty:
         return None
     source = channel.episodes[0]
     out_path = cache_dir / poster_filename(channel)
@@ -364,11 +374,9 @@ def compose_show_grid(
     tiles: Sequence[Channel], posters: Dict[int, Path], out_path: Path
 ) -> Optional[Path]:
     """Render the full show-grid background image: dark backdrop plus every
-    channel's poster (or a plain placeholder tile if it has none - this is
-    what every game-system tile gets, since a ROM has no frame to grab),
+    channel's poster (or a plain placeholder tile if it has none),
     positioned via :func:`admin_section_layout` so overlay.py's section
-    labels and highlight ring line up with it exactly. ``tiles`` is real
-    channels and game systems combined, in the order they should appear.
+    labels and highlight ring line up with it exactly.
 
     The image is exactly ``GRID_W`` wide but may be *taller* than ``GRID_H``
     when there's more content than fits one screen (see
@@ -492,8 +500,6 @@ def generate_admin_assets(
     stale channel posters, then compose the full show-grid background.
     Best-effort throughout - returns None (and logs a warning) rather than
     raising, so a missing ffmpeg/Pillow never breaks config validation.
-    ``tiles`` is real channels and game systems combined (see
-    ``nostalgiabox.app.TVApp._admin_tiles``).
     """
     posters = ensure_all_posters(tiles, cache_dir, force=force)
     return compose_show_grid(tiles, posters, cache_dir / GRID_FILENAME)

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import __version__
-from .channel import build_game_channels, build_lineup
+from .channel import build_lineup
 from .config import Config, ConfigError, load_config
 
 log = logging.getLogger("nostalgiabox")
@@ -46,7 +46,6 @@ def _cmd_check(config: Config) -> int:
         return 2
 
     lineup = build_lineup(config)
-    games = build_game_channels(config)
     print(f"NostalgiaBox v{__version__} - configuration OK")
     print(f"tune-in mode: {config.tune_in}")
     if overrides:
@@ -60,15 +59,8 @@ def _cmd_check(config: Config) -> int:
         print(f"  CH {channel.number:>3}  {channel.name:<28} {count:>4} episodes{flag}")
     print(f"total episodes: {total}")
 
-    if games:
-        print(f"game systems ({len(games)}):")
-        for system in games:
-            count = len(system.episodes)
-            flag = "" if count else "   <-- NO ROMS FOUND"
-            print(f"  CH {system.number:>3}  {system.name:<28} {count:>4} games{flag}")
-
     if config.admin_mode_enabled:
-        _generate_admin_thumbnails(config, list(lineup) + games)
+        _generate_admin_thumbnails(config, list(lineup))
 
     return 0 if total > 0 else 1
 
@@ -81,9 +73,6 @@ def _generate_admin_thumbnails(config: Config, tiles) -> None:
     plays the pre-composed image (see thumbnails.py) the same way it plays
     the static/colour-bars filler clips. Missing ffmpeg/Pillow, or a failed
     extraction, only produces a warning - it never blocks config validation.
-    ``tiles`` is real channels and game systems combined; game systems never
-    get a poster (no frame to grab from a ROM) - they get a plain
-    placeholder tile in the composed grid instead.
     """
     from .static_gen import DEFAULT_ASSETS_DIR
     from .thumbnails import THUMBS_SUBDIR, ffmpeg_available, generate_admin_assets, pillow_available

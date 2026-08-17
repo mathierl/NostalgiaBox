@@ -1,7 +1,7 @@
 from PIL import Image
 
 from nostalgiabox import thumbnails
-from nostalgiabox.channel import build_game_channels, build_lineup
+from nostalgiabox.channel import build_lineup
 from nostalgiabox.config import config_from_dict
 from tests.helpers import make_show
 
@@ -63,37 +63,21 @@ def test_sections_bottom_with_no_tiles_is_just_the_header(tmp_path):
 
 
 def test_scrollable_content_height_reserves_room_for_evergreen_rows(tmp_path):
+    # Three evergreen rows now (UKE-29 v2): Insights, Adult Mode, and Open
+    # RetroArch - the last one's space is reserved even while Adult Mode is
+    # off and it isn't shown (see scrollable_content_height's docstring).
     channels = _lineup(tmp_path, shows=[(2, "a", 1)])
     bottom = thumbnails.sections_bottom(channels)
-    expected = bottom + 2 * (thumbnails.EVERGREEN_ROW_H + thumbnails.EVERGREEN_GAP_ABOVE) + thumbnails.GRID_FOOTER_H
+    expected = bottom + 3 * (thumbnails.EVERGREEN_ROW_H + thumbnails.EVERGREEN_GAP_ABOVE) + thumbnails.GRID_FOOTER_H
     assert thumbnails.scrollable_content_height(channels) == expected
 
 
 def test_section_bounds_returns_none_for_a_missing_section(tmp_path):
     channels = _lineup(tmp_path, shows=[(2, "a", 1)])
-    assert thumbnails.section_bounds(channels, "Games") is None
+    assert thumbnails.section_bounds(channels, "Nonexistent") is None
     bounds = thumbnails.section_bounds(channels, "Shows")
     assert bounds is not None
     assert bounds[0] < bounds[1]
-
-
-def test_section_bounds_finds_the_games_section(tmp_path):
-    make_show(tmp_path, "a", 1)
-    make_show(tmp_path, "snes", 2, ext=".sfc")
-    config = config_from_dict(
-        {
-            "shuffle_seed": 1,
-            "channels": [{"number": 2, "name": "Arthur", "path": str(tmp_path / "a")}],
-            "games": {
-                "systems": [
-                    {"name": "SNES", "path": str(tmp_path / "snes"), "core": "core.so", "extensions": [".sfc"]}
-                ]
-            },
-        }
-    )
-    tiles = list(build_lineup(config)) + build_game_channels(config)
-    bounds = thumbnails.section_bounds(tiles, "Games")
-    assert bounds is not None
 
 
 def test_tile_bounds_includes_label_height(tmp_path):
@@ -170,8 +154,12 @@ def test_compose_show_grid_is_taller_when_content_overflows_one_screen(tmp_path)
     thumbnails.compose_show_grid(few, {}, out_few)
     thumbnails.compose_show_grid(many, {}, out_many)
 
+    # "few" is exactly as tall as the content needs (which may itself be a
+    # touch over one screen now that three evergreen rows' worth of space -
+    # Insights, Adult Mode, Open RetroArch - is always reserved, UKE-29 v2);
+    # "many" is taller still, since it also has to fit the wrapped tile rows.
     with Image.open(out_few) as img:
-        assert img.size == (thumbnails.GRID_W, thumbnails.GRID_H)  # fits on one screen
+        assert img.size == (thumbnails.GRID_W, max(thumbnails.GRID_H, thumbnails.scrollable_content_height(few)))
     with Image.open(out_many) as img:
-        assert img.size[1] > thumbnails.GRID_H  # overflows - taller than one screen
+        assert img.size[1] > thumbnails.scrollable_content_height(few)
         assert img.size[0] == thumbnails.GRID_W

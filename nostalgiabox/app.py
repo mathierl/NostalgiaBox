@@ -21,9 +21,9 @@ caught and handled). Back to mpv rendering everything itself: the browse
 grid/episode list/Insights screen are drawn as ASS overlays (see overlay.py)
 on top of a pre-composed poster-grid background image (see thumbnails.py)
 that mpv just plays like any other clip - one process, one owner of the
-display, no race condition. The only remaining display handoff is launching
-a game via RetroArch (see _launch_game), which does have to close mpv - that
-one was validated safe on real hardware independently (see
+display, no race condition. The only remaining display handoff is opening
+RetroArch (see _open_retroarch), which does have to close mpv - that one was
+validated safe on real hardware independently (see
 scripts/spike_mpv_retroarch_handoff.py, UKE-28).
 
 Further real-hardware feedback (still UKE-29) led to a second pass on admin
@@ -59,6 +59,17 @@ fixed comfortable size and wrap onto more rows instead of shrinking - see
 the cursor moves between rows (``_scroll_y`` / ``_sync_admin_scroll``),
 cropping a screen's worth out of the pre-composed image live (see
 ``nostalgiabox.thumbnails.crop_viewport`` - cheap, no ffmpeg/poster work).
+
+A second UKE-29 pass dropped games as a curated part of the grid entirely
+(they used to be a second "Games" section of ROM tiles, browsed and launched
+per-ROM just like a show's episode list - see git history around "game
+systems (UKE-28)" if you need the old approach for reference). Adult Mode's
+grid instead gets a third evergreen row, "Open RetroArch" (only shown once
+Adult Mode is on - see ``_section_keys``), that hands the whole display to
+RetroArch's own menu with no arguments at all (``_open_retroarch``) - its
+playlists, cores, save states and cheats take over completely, and
+NostalgiaBox has no visibility into what gets played from there (Insights is
+show-only again as a result - see watch_state.py).
 """
 
 from __future__ import annotations
@@ -72,7 +83,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from .actions import Action, InputEvent
-from .channel import Channel, ChannelLineup, PlayRequest, build_game_channels, build_lineup
+from .channel import Channel, ChannelLineup, PlayRequest, build_lineup
 from .config import Config
 from .input.manager import InputManager, create_backends
 from .overlay import OverlayManager
@@ -98,7 +109,7 @@ log = logging.getLogger(__name__)
 def _build_mpv_player(config: Config, assets_dir: Path) -> Player:
     """Construct a real MpvPlayer from config - factored out of from_config so
     it can also be used as a *factory*, called again later to reopen mpv
-    after a game launch hands the display back (see TVApp._launch_game and
+    after RetroArch hands the display back (see TVApp._open_retroarch and
     scripts/spike_mpv_retroarch_handoff.py, which confirmed this handoff is
     safe on real hardware - UKE-28).
     """
@@ -115,16 +126,18 @@ def _build_mpv_player(config: Config, assets_dir: Path) -> Player:
     )
 
 
-def _default_game_launcher(core: str, rom: Path) -> int:
-    """Run a game to completion via bare RetroArch, blocking until it exits
-    (normally via its own F1 -> Quit RetroArch). A failed launch should never
+def _default_retroarch_launcher() -> int:
+    """Launch bare RetroArch - no ``-L``/content args - so it opens straight
+    to its own menu (UKE-29 v2, see the module docstring): the user picks a
+    core, playlist or ROM from there, same as any standalone RetroArch
+    install. Blocks until RetroArch exits. A failed launch should never
     crash the box, so any exception is caught and treated as a non-zero exit.
     """
     try:
-        result = subprocess.run(["retroarch", "-L", core, str(rom)])
+        result = subprocess.run(["retroarch"])
         return result.returncode
     except Exception:  # noqa: BLE001
-        log.exception("failed to launch game: core=%s rom=%s", core, rom)
+        log.exception("failed to launch retroarch")
         return 1
 
 
@@ -141,7 +154,7 @@ class TVApp:
         clock: Callable[[], float] = time.monotonic,
         assets_dir: Optional[Path] = None,
         player_factory: Optional[Callable[[], Player]] = None,
-        game_launcher: Optional[Callable[[str, Path], int]] = None,
+        retroarch_launcher: Optional[Callable[[], int]] = None,
         watch_state: Optional[WatchState] = None,
         drm_handoff_delay: float = 0.0,
     ) -> None:
@@ -150,20 +163,20 @@ class TVApp:
         self.input = input_manager
         self.overlay = overlay or OverlayManager(player, config, clock=clock)
         self._clock = clock
-        # Per-episode/per-game watch history (UKE-29) - None by default (as
-        # in most tests) means "don't track", so nothing touches disk unless
-        # a caller explicitly opts in; from_config wires up a real one.
+        # Per-episode watch history (UKE-29) - None by default (as in most
+        # tests) means "don't track", so nothing touches disk unless a
+        # caller explicitly opts in; from_config wires up a real one.
         self.watch_state = watch_state
-        # Rebuilds a fresh Player after a game hands the display back (see
-        # _launch_game) - only set for real hardware (from_config); with no
-        # factory (dry-run / most tests) the same player instance is reused,
-        # which is fine for MockPlayer and for anything that never launches
-        # a game.
+        # Rebuilds a fresh Player after RetroArch hands the display back (see
+        # _open_retroarch) - only set for real hardware (from_config); with
+        # no factory (dry-run / most tests) the same player instance is
+        # reused, which is fine for MockPlayer and for anything that never
+        # opens RetroArch.
         self._player_factory = player_factory
-        self._game_launcher = game_launcher or _default_game_launcher
-        # A brief pause around the one remaining display handoff - launching
-        # a game via RetroArch (see _launch_game) - between mpv releasing
-        # the display and the next owner claiming it. mpv.terminate()
+        self._retroarch_launcher = retroarch_launcher or _default_retroarch_launcher
+        # A brief pause around the one remaining display handoff - opening
+        # RetroArch (see _open_retroarch) - between mpv releasing the
+        # display and the next owner claiming it. mpv.terminate()
         # returns once its core thread has shut down, but the DRM/GBM
         # teardown underneath it isn't strictly guaranteed to be finished by
         # then; real-hardware testing this session (UKE-29) found this
@@ -176,10 +189,6 @@ class TVApp:
         self._drm_handoff_delay = drm_handoff_delay
 
         self.lineup: ChannelLineup = build_lineup(config)
-        # Game systems (see UKE-28): shown in the admin browse grid alongside
-        # real channels (_admin_tiles), but never part of self.lineup - the
-        # kid-facing tuner must never be able to land on one.
-        self.games: List[Channel] = build_game_channels(config)
 
         # Runtime state.
         self.volume = config.initial_volume
@@ -221,6 +230,11 @@ class TVApp:
         # row's "cursor is on it" marker, same idea as _browse_on_insights.
         self.adult_mode = False
         self._browse_on_adult_toggle = False
+        # Open RetroArch (UKE-29 v2): a third evergreen row, only present in
+        # _section_keys while Adult Mode is on - see _open_retroarch and the
+        # module docstring for why games are no longer curated in-grid at
+        # all. Same "cursor is on it" marker pattern as the two rows above.
+        self._browse_on_open_retroarch = False
         # How far the grid has scrolled (UKE-29) - see _sync_admin_scroll,
         # called any time the cursor moves to a row that might not already
         # be on screen. Reset to 0 whenever the grid is (re)opened.
@@ -229,7 +243,7 @@ class TVApp:
         self._browse_episode_number: Optional[int] = None
         self._browse_episode_index: int = 0
         # "Continue Watching" row (UKE-29): a text-only row of in-progress
-        # episodes shown above the channel/game grid. _continue_entries is
+        # episodes shown above the channel grid. _continue_entries is
         # (re)computed each time the grid is (re)entered, not on every
         # keypress - see _refresh_continue_entries. _browse_continue_index
         # is None whenever the cursor is on the grid itself (the common
@@ -304,8 +318,8 @@ class TVApp:
             else:
                 assets = assets_dir or config.assets_dir or DEFAULT_ASSETS_DIR
                 player = _build_mpv_player(config, assets)
-                # Lets _launch_game reopen mpv with the exact same options
-                # after a game hands the display back.
+                # Lets _open_retroarch reopen mpv with the exact same options
+                # after RetroArch hands the display back.
                 player_factory = lambda: _build_mpv_player(config, assets)
 
         if input_manager is None:
@@ -527,6 +541,7 @@ class TVApp:
         self._browse_continue_index = None
         self._browse_on_insights = False
         self._browse_on_adult_toggle = False
+        self._browse_on_open_retroarch = False
         self._scroll_y = 0
         self._browse_number = channel.number
         self._browse_episode_number = channel.number
@@ -685,6 +700,8 @@ class TVApp:
                 self._confirm_insights_selection()
             elif self._browse_on_adult_toggle:
                 self._confirm_adult_toggle()
+            elif self._browse_on_open_retroarch:
+                self._open_retroarch()
             else:
                 self._confirm_show_selection()
             return
@@ -724,6 +741,7 @@ class TVApp:
         self._browse_continue_index = None
         self._browse_on_insights = False
         self._browse_on_adult_toggle = False
+        self._browse_on_open_retroarch = False
         self._scroll_y = 0
         self._refresh_continue_entries()
         self._pre_admin_path = self._playing_path
@@ -745,6 +763,7 @@ class TVApp:
         self._browse_continue_index = None
         self._browse_on_insights = False
         self._browse_on_adult_toggle = False
+        self._browse_on_open_retroarch = False
         if not self.adult_mode and self.paused:
             self._toggle_pause()
         self.overlay.clear_admin_panel()
@@ -809,8 +828,9 @@ class TVApp:
         """Rebuild mpv via the injected factory (real hardware only - see
         __init__); with no factory (dry-run / most tests) this is a no-op,
         the same MockPlayer instance is reused throughout. Only ever needed
-        after a game hands the display back (see _launch_game) - browsing
-        the admin grid/episode list/Insights never closes mpv at all.
+        after RetroArch hands the display back (see _open_retroarch) -
+        browsing the admin grid/episode list/Insights never closes mpv at
+        all.
         """
         if self._player_factory is None:
             return
@@ -853,6 +873,7 @@ class TVApp:
                 insights_selected=self._browse_on_insights,
                 adult_mode=self.adult_mode,
                 adult_toggle_selected=self._browse_on_adult_toggle,
+                open_retroarch_selected=self._browse_on_open_retroarch,
                 scroll_y=self._scroll_y,
             )
             return
@@ -881,12 +902,13 @@ class TVApp:
         return summary, suggestions
 
     def _admin_tiles(self) -> List[Channel]:
-        """Every tile the admin browse grid shows: real channels, then game
-        systems, in that order. Games are never part of self.lineup (see
-        __init__) - this combined view exists only for the admin browse
-        screens.
+        """Every tile the admin browse grid shows. Used to be real channels
+        plus game systems combined (UKE-28/UKE-29) - now just an alias for
+        ``self.lineup``, kept as its own method since callers throughout
+        this class and thumbnails.py were written against it and games may
+        graduate back into a real per-tile browse experience some day.
         """
-        return list(self.lineup) + list(self.games)
+        return list(self.lineup)
 
     def _channel_by_number(self, number: Optional[int]) -> Optional[Channel]:
         if number is None:
@@ -899,34 +921,32 @@ class TVApp:
         return self._assets_dir / THUMBS_SUBDIR
 
     def _section_tiles(self, key: str) -> List[Channel]:
-        """The channels/game systems in one named browse row. 'continue'
-        isn't a real Channel list (see self._continue_entries instead) -
-        callers asking for it get nothing back on purpose.
+        """The channels in one named browse row. 'continue' isn't a real
+        Channel list (see self._continue_entries instead) - callers asking
+        for it get nothing back on purpose.
         """
         if key == "shows":
             return [c for c in self.lineup]
-        if key == "games":
-            return list(self.games)
         return []
 
     def _section_keys(self) -> List[str]:
         """Every browse row currently on screen, top to bottom: Continue
-        Watching (only if it has anything in it), then Shows, then Games -
-        each only present if it isn't empty - then the two evergreen rows,
-        Insights and the Adult Mode toggle (UKE-29), always present at the
-        bottom regardless of what's been watched yet. This is recomputed on
-        every move rather than cached, since it's cheap and always needs to
-        reflect self._continue_entries's current contents anyway.
+        Watching (only if it has anything in it), then Shows (if not
+        empty), then the evergreen rows - Insights and the Adult Mode
+        toggle, always present, then Open RetroArch (UKE-29 v2), present
+        only once Adult Mode is on. This is recomputed on every move rather
+        than cached, since it's cheap and always needs to reflect
+        self._continue_entries's current contents anyway.
         """
         keys = []
         if self._continue_entries:
             keys.append("continue")
         if self._section_tiles("shows"):
             keys.append("shows")
-        if self._section_tiles("games"):
-            keys.append("games")
         keys.append("insights")
         keys.append("adult_toggle")
+        if self.adult_mode:
+            keys.append("open_retroarch")
         return keys
 
     def _current_section(self) -> str:
@@ -936,9 +956,8 @@ class TVApp:
             return "insights"
         if self._browse_on_adult_toggle:
             return "adult_toggle"
-        channel = self._channel_by_number(self._browse_number)
-        if channel is not None and channel.config.kind == "game":
-            return "games"
+        if self._browse_on_open_retroarch:
+            return "open_retroarch"
         return "shows"
 
     def _enter_section(self, key: str) -> None:
@@ -950,6 +969,7 @@ class TVApp:
         self._browse_continue_index = None
         self._browse_on_insights = False
         self._browse_on_adult_toggle = False
+        self._browse_on_open_retroarch = False
         if key == "continue":
             self._browse_continue_index = 0
             return
@@ -958,6 +978,9 @@ class TVApp:
             return
         if key == "adult_toggle":
             self._browse_on_adult_toggle = True
+            return
+        if key == "open_retroarch":
+            self._browse_on_open_retroarch = True
             return
         tiles = self._section_tiles(key)
         if tiles:
@@ -972,25 +995,30 @@ class TVApp:
 
         if key == "continue":
             return None  # pinned above the header - always visible, see GRID_HEADER_H
-        if key in ("shows", "games"):
-            return thumbnails.section_bounds(self._admin_tiles(), "Shows" if key == "shows" else "Games")
+        if key == "shows":
+            return thumbnails.section_bounds(self._admin_tiles(), "Shows")
         bottom = thumbnails.sections_bottom(self._admin_tiles())
         insights_top = bottom + thumbnails.EVERGREEN_GAP_ABOVE
         insights_bottom = insights_top + thumbnails.EVERGREEN_ROW_H
         if key == "insights":
             return insights_top, insights_bottom
+        adult_top = insights_bottom + thumbnails.EVERGREEN_GAP_ABOVE
+        adult_bottom = adult_top + thumbnails.EVERGREEN_ROW_H
         if key == "adult_toggle":
-            adult_top = insights_bottom + thumbnails.EVERGREEN_GAP_ABOVE
-            return adult_top, adult_top + thumbnails.EVERGREEN_ROW_H
+            return adult_top, adult_bottom
+        if key == "open_retroarch":
+            retro_top = adult_bottom + thumbnails.EVERGREEN_GAP_ABOVE
+            return retro_top, retro_top + thumbnails.EVERGREEN_ROW_H
         return None
 
     def _move_browse_cursor(self, *, drow: int = 0, dcol: int = 0) -> None:
         """Move the browse cursor. The screen is a stack of independent
-        single-row "swimlanes" - Continue Watching, Shows, Games, Insights,
-        Adult Mode (each only present if it has anything in it, except the
-        last two which are always there; see _section_keys) - rather than a
-        flat grid. Channel Up/Down move between rows and stop at the top/
-        bottom (no wraparound between rows); Volume Up/Down move within
+        single-row "swimlanes" - Continue Watching, Shows, Insights, Adult
+        Mode, and (once Adult Mode is on) Open RetroArch (each only present
+        if it has anything in it / is currently unlocked, except Insights
+        and Adult Mode which are always there; see _section_keys) - rather
+        than a flat grid. Channel Up/Down move between rows and stop at the
+        top/bottom (no wraparound between rows); Volume Up/Down move within
         whichever row the cursor is on, wrapping at its ends.
         """
         sections = self._section_keys()
@@ -1006,7 +1034,7 @@ class TVApp:
                 n = len(self._continue_entries)
                 if n:
                     self._browse_continue_index = (self._browse_continue_index + dcol) % n
-            elif current_key not in ("insights", "adult_toggle"):
+            elif current_key not in ("insights", "adult_toggle", "open_retroarch"):
                 numbers = [c.number for c in self._section_tiles(current_key)]
                 if numbers:
                     pos = numbers.index(self._browse_number) if self._browse_number in numbers else 0
@@ -1030,7 +1058,7 @@ class TVApp:
 
     def _sync_scroll_to_cursor(self) -> None:
         """Scroll the grid, if needed, so whatever's currently highlighted -
-        a tile, or one of the two evergreen rows - is fully visible (UKE-29,
+        a tile, or one of the evergreen rows - is fully visible (UKE-29,
         see _sync_admin_scroll). A no-op for the Continue Watching row
         (pinned above the header - see GRID_HEADER_H - so it never needs
         scrolling) or if nothing's actually highlighted yet.
@@ -1040,7 +1068,7 @@ class TVApp:
         key = self._current_section()
         if key == "continue":
             return
-        if key in ("insights", "adult_toggle"):
+        if key in ("insights", "adult_toggle", "open_retroarch"):
             bounds = self._section_scroll_bounds(key)
         else:
             bounds = None
@@ -1125,15 +1153,6 @@ class TVApp:
         channel = self._channel_by_number(self._browse_episode_number)
         has_selection = channel is not None and 0 <= self._browse_episode_index < len(channel.episodes)
 
-        if has_selection and channel.config.kind == "game":
-            # Games hand off to RetroArch and land back on this exact game
-            # list - nothing "starts playing" in the mpv sense, so unlike a
-            # show episode, admin_episode_browsing is left untouched (see
-            # _launch_game).
-            self._launch_game(channel, channel.episodes[self._browse_episode_index])
-            self._refresh_admin_panel()
-            return
-
         self.admin_episode_browsing = False
         if has_selection:
             episode_path = channel.episodes[self._browse_episode_index]
@@ -1142,9 +1161,14 @@ class TVApp:
         self._browse_number = self.lineup.current.number
         self._refresh_admin_panel()
 
-    def _launch_game(self, channel: Channel, rom_path: Path) -> None:
-        """Hand the display to RetroArch for one game, then return to
-        exactly the admin browse screen the game was launched from.
+    def _open_retroarch(self) -> None:
+        """Hand the display to RetroArch's own menu (UKE-29 v2, see the
+        module docstring) - no ``-L``/content args, so it opens straight to
+        RetroArch's own playlists/cores/settings, exactly like a standalone
+        RetroArch install. Only reachable once Adult Mode is on (see
+        _section_keys) - this hands over full, uncurated control of the box,
+        closer to a real computer than anything else in here. Returns to
+        exactly the browse grid it was opened from once RetroArch exits.
 
         This is the one remaining place mpv actually closes (see the module
         docstring) - confirmed safe on real hardware by
@@ -1153,24 +1177,15 @@ class TVApp:
         and a fresh MpvPlayer reopens cleanly afterward - repeatedly, not
         just once.
         """
-        core = channel.config.core
-        if not core:
-            log.warning("game channel %r has no core configured; not launching", channel.name)
-            return
         self.player.close()
         if self._drm_handoff_delay > 0:
             time.sleep(self._drm_handoff_delay)
         try:
-            self._game_launcher(core, rom_path)
+            self._retroarch_launcher()
         finally:
-            if self.watch_state is not None:
-                # Boolean played/play-count only (UKE-29) - RetroArch gives
-                # no duration or position signal, so "played" is the honest
-                # v1 semantic regardless of exit code.
-                self.watch_state.record_game_played(channel.number, channel.config.path, rom_path)
             # Back to browsing: reopen mpv and re-arm the poster-grid loop
-            # image (the same thing _toggle_admin_mode does on entry) so the
-            # episode-list overlay has its usual backdrop again.
+            # image (the same thing _open_admin_browsing does on entry) so
+            # the grid overlay has its usual backdrop again.
             self._reopen_player()
             self._show_admin_grid_background()
 
@@ -1243,6 +1258,7 @@ class TVApp:
             self._browse_continue_index = None
             self._browse_on_insights = False
             self._browse_on_adult_toggle = False
+            self._browse_on_open_retroarch = False
             self._scroll_y = 0
             self._continue_entries = []
             self._pre_admin_path = None

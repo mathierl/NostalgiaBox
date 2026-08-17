@@ -147,27 +147,16 @@ admin_seek_seconds: 10.0
 # is on and something's playing.
 subtitles_default: false
 
-# --- Games (optional) ---------------------------------------------------------
-# Emulated game systems, launched via RetroArch, browsed the same way as
-# channels: each system is a tile in the admin grid, its ROMs a numbered list
-# inside it. Games never appear on the kid-facing remote - only inside admin
-# mode, alongside real channels. Needs RetroArch and the relevant libretro
-# core(s) installed on the Pi (see the project wiki/README for setup). Numbers
-# default to continuing on right after your last real channel, or set them
-# explicitly ('number:') same as a channel.
-# games:
-#   systems:
-#     - name: SNES
-#       path: /media/nostalgiabox-roms/snes
-#       core: /usr/lib/aarch64-linux-gnu/libretro/snes9x_libretro.so
-#       extensions: [".sfc", ".smc"]
-#     - name: PS1
-#       path: /media/nostalgiabox-roms/ps1
-#       core: ~/.config/retroarch/cores/pcsx_rearmed_libretro.so
-#       extensions: [".cue", ".chd"]
-#       # PS1 also needs a BIOS dump in RetroArch's own system directory
-#       # (~/.config/retroarch/system/), dumped from your own PS1 console -
-#       # this isn't something NostalgiaBox manages.
+# --- Games ---------------------------------------------------------------------
+# Nothing to configure here. Once Adult Mode is on (see above), the admin
+# grid gets an "Open RetroArch" row that hands the screen straight to plain
+# `retroarch` with no arguments - its own menu, playlists, cores, save
+# states and cheats take over from there, exactly like any other RetroArch
+# setup. Install RetroArch and whatever libretro cores/BIOS files your games
+# need on the Pi (see the project wiki/README for setup) and set them up
+# inside RetroArch itself - NostalgiaBox never touches any of that. Games
+# never appear on the kid-facing remote - only reachable from inside Adult
+# Mode.
 
 # --- Remote control input ----------------------------------------------------
 # All backends are auto-detected; anything unavailable is skipped, so these are

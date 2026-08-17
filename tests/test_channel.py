@@ -4,7 +4,6 @@ from nostalgiabox.channel import (
     BroadcastSchedule,
     Channel,
     ChannelLineup,
-    build_game_channels,
     build_lineup,
     detect_season,
     scan_episodes,
@@ -197,76 +196,6 @@ def test_lineup_navigation(tmp_path):
     assert lineup.select_number(4).number == 4
     assert lineup.select_number(99) is None
     assert lineup.has_number(7)
-
-
-# -- games (admin mode arcade, UKE-28) --------------------------------------
-
-
-def _games_config(tmp_path, *, roms=3, ext=".sfc"):
-    make_show(tmp_path, "dragon", 1)
-    make_show(tmp_path, "snes", roms, ext=ext)
-    return config_from_dict(
-        {
-            "channels": [{"number": 2, "name": "Dragon Tales", "path": str(tmp_path / "dragon")}],
-            "games": {
-                "systems": [
-                    {
-                        "name": "SNES",
-                        "path": str(tmp_path / "snes"),
-                        "core": "/cores/snes9x.so",
-                        "extensions": [ext],
-                    }
-                ]
-            },
-        }
-    )
-
-
-def test_build_game_channels_scans_roms(tmp_path):
-    cfg = _games_config(tmp_path, roms=3)
-    (tmp_path / "snes" / "readme.txt").write_bytes(b"not a rom")
-    games = build_game_channels(cfg)
-    assert len(games) == 1
-    system = games[0]
-    assert system.name == "SNES"
-    assert system.config.kind == "game"
-    assert system.config.core == "/cores/snes9x.so"
-    assert len(system.episodes) == 3
-    assert all(p.suffix == ".sfc" for p in system.episodes)  # readme.txt excluded
-
-
-def test_build_game_channels_warns_but_does_not_crash_on_empty_system(tmp_path):
-    make_show(tmp_path, "dragon", 1)
-    (tmp_path / "ps1").mkdir()
-    cfg = config_from_dict(
-        {
-            "channels": [{"number": 2, "name": "Dragon Tales", "path": str(tmp_path / "dragon")}],
-            "games": {
-                "systems": [
-                    {"name": "PS1", "path": str(tmp_path / "ps1"), "core": "core.so", "extensions": [".cue"]}
-                ]
-            },
-        }
-    )
-    games = build_game_channels(cfg)
-    assert games[0].is_empty
-
-
-def test_no_games_configured_returns_empty_list(tmp_path):
-    make_show(tmp_path, "dragon", 1)
-    cfg = config_from_dict(
-        {"channels": [{"number": 2, "name": "Dragon Tales", "path": str(tmp_path / "dragon")}]}
-    )
-    assert build_game_channels(cfg) == []
-
-
-def test_game_channels_never_appear_in_the_real_lineup(tmp_path):
-    cfg = _games_config(tmp_path)
-    lineup = build_lineup(cfg)
-    assert all(c.config.kind == "show" for c in lineup)
-    assert lineup.numbers == [2]
-    game_number = cfg.games[0].number
-    assert not lineup.has_number(game_number)
 
 
 def test_lineup_sorted_by_number(tmp_path):

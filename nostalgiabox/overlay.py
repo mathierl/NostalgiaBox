@@ -119,14 +119,14 @@ class OverlayManager:
     def rebind_player(self, player: Player) -> None:
         """Point future overlay calls at a newly (re)created Player instance.
 
-        TVApp._reopen_player() swaps in a fresh mpv instance after a game
+        TVApp._reopen_player() swaps in a fresh mpv instance after RetroArch
         hands the display back (the old one was already terminated - see
         Player.close()). Without calling this too, every overlay method
         below would keep silently talking to that dead instance for the
         rest of the process's life: MpvPlayer's overlay calls all swallow
         exceptions internally (see player.py), so nothing crashes - the
         channel bug, volume bar, and admin overlays just silently stop
-        appearing after the first game-launch cycle.
+        appearing after the first RetroArch handoff.
         """
         self._player = player
 
@@ -175,27 +175,29 @@ class OverlayManager:
         insights_selected: bool = False,
         adult_mode: bool = False,
         adult_toggle_selected: bool = False,
+        open_retroarch_selected: bool = False,
         scroll_y: int = 0,
     ) -> None:
         """Highlight ring, title/subtitle labels and header/footer text drawn
         on top of the real poster-grid background image (see
         :mod:`nostalgiabox.thumbnails` and :class:`nostalgiabox.app.TVApp`,
         which swaps the player onto that image before calling this).
-        ``tiles`` is real channels and game systems combined (see
-        :meth:`nostalgiabox.app.TVApp._admin_tiles`), in display order.
+        ``tiles`` is real channels, in display order.
 
         ``continue_entries`` (see :mod:`nostalgiabox.watch_state`) is drawn
         as a text-only row above the header, e.g. "Arthur - Sick as a Dog
-        (12 min left)" - no poster art, since unlike the channel/game grid
-        it can't be pre-baked into the background image (it changes with
-        live watch state, not just at ``--check`` time). ``continue_index``
-        highlights one of them; when it's not ``None`` the channel/game grid
+        (12 min left)" - no poster art, since unlike the channel grid it
+        can't be pre-baked into the background image (it changes with live
+        watch state, not just at ``--check`` time). ``continue_index``
+        highlights one of them; when it's not ``None`` the channel grid
         below isn't highlighted at all (the cursor is on the row, not the
         grid) - see :meth:`nostalgiabox.app.TVApp._move_browse_cursor`.
-        ``insights_selected``/``adult_toggle_selected`` highlight the two
-        evergreen rows at the bottom instead (UKE-29) - mutually exclusive
-        with everything else and each other. ``adult_mode`` reflects the
-        toggle's current ON/OFF state (not selection).
+        ``insights_selected``/``adult_toggle_selected``/
+        ``open_retroarch_selected`` highlight the evergreen rows at the
+        bottom instead (UKE-29) - mutually exclusive with everything else
+        and each other. ``adult_mode`` reflects the toggle's current
+        ON/OFF state (not selection) - the Open RetroArch row (UKE-29 v2)
+        only ever draws while it's on; see :func:`_admin_browser_ass`.
 
         ``scroll_y`` (UKE-29) is how far the *body* below the fixed header/
         Continue-Watching row has scrolled - see
@@ -212,6 +214,7 @@ class OverlayManager:
             insights_selected,
             adult_mode,
             adult_toggle_selected,
+            open_retroarch_selected,
             scroll_y,
         )
         self._player.set_overlay(_ID_ADMIN, ass, CANVAS_W, CANVAS_H)
@@ -227,9 +230,7 @@ class OverlayManager:
         """Full-screen numbered episode list for one channel (no poster art -
         just an opaque backdrop plus text), reached by confirming a channel
         in :meth:`show_admin_browser`. ``watch_state`` (UKE-29), if given,
-        adds a watched checkmark / in-progress marker next to each episode
-        (games have no such state - see watch_state.py's module docstring -
-        so it's simply not consulted for a game system's list).
+        adds a watched checkmark / in-progress marker next to each episode.
         """
         ass = _admin_episode_list_ass(channel, highlight_index, watch_state)
         self._player.set_overlay(_ID_ADMIN, ass, CANVAS_W, CANVAS_H)
@@ -239,7 +240,7 @@ class OverlayManager:
         self, summary: "InsightsSummary", *, suggestions: Sequence[str] = ()
     ) -> None:
         """Full-screen, read-only watch-stats view (UKE-29): totals, a
-        "favorite" channel/game system, per-channel completion progress, a
+        "favorite" channel, per-channel completion progress, a
         recent-activity feed, and text-only similar-show suggestions for the
         favorite (see :mod:`nostalgiabox.recommendations`) - reached by
         confirming the evergreen Insights tile at the bottom of the show
@@ -430,24 +431,25 @@ def _admin_browser_ass(
     insights_selected: bool = False,
     adult_mode: bool = False,
     adult_toggle_selected: bool = False,
+    open_retroarch_selected: bool = False,
     scroll_y: int = 0,
 ) -> str:
-    """Header, per-section "Shows"/"Games" swimlane labels, per-tile title/
-    count labels (positioned to sit right under each poster - see
+    """Header, the "Shows" swimlane's label, per-tile title/count labels
+    (positioned to sit right under each poster - see
     :func:`nostalgiabox.thumbnails.admin_section_layout` - a highlight ring
-    around the selected one, the evergreen Insights/Adult-Mode rows below
-    them, and a footer hint. The posters themselves are the background
-    image this draws on top of, not drawn here. ``tiles`` is real channels
-    and game systems combined.
+    around the selected one, the evergreen rows below them, and a footer
+    hint. The posters themselves are the background image this draws on top
+    of, not drawn here.
 
     ``continue_entries`` draws the "Continue Watching" row above the header
     (see the constants just above); when ``continue_index`` is set, that's
-    where the cursor is. ``insights_selected``/``adult_toggle_selected``
-    highlight the two evergreen rows instead. All four highlight states are
-    mutually exclusive. ``scroll_y`` (UKE-29) shifts everything from the
-    first section down by that many pixels - see the module docstring and
-    :func:`nostalgiabox.thumbnails.crop_viewport`, which crops the matching
-    window out of the background image so the two stay in lock-step.
+    where the cursor is. ``insights_selected``/``adult_toggle_selected``/
+    ``open_retroarch_selected`` highlight the evergreen rows instead. All
+    highlight states are mutually exclusive. ``scroll_y`` (UKE-29) shifts
+    everything from the first section down by that many pixels - see the
+    module docstring and :func:`nostalgiabox.thumbnails.crop_viewport`,
+    which crops the matching window out of the background image so the two
+    stay in lock-step.
     """
     channels = list(tiles)
     header = "Select a channel"
@@ -510,6 +512,7 @@ def _admin_browser_ass(
                 continue_index is None
                 and not insights_selected
                 and not adult_toggle_selected
+                and not open_retroarch_selected
                 and channel.number == highlight_number
             )
             if selected:
@@ -528,12 +531,16 @@ def _admin_browser_ass(
                 f"{_escape(subtitle)}"
             )
 
-    # The two evergreen rows - Watch Insights, then Adult Mode - always
-    # present, always last, right after the real sections (and, like them,
-    # subject to scroll_y).
+    # The evergreen rows - Watch Insights, then Adult Mode, then (once Adult
+    # Mode is on) Open RetroArch - always right after the real sections, in
+    # that order, and (like them) subject to scroll_y. Open RetroArch's
+    # vertical space is reserved even while hidden (see
+    # thumbnails.scrollable_content_height) so nothing else ever shifts
+    # position as Adult Mode toggles on/off.
     bottom = sections_bottom(channels)
     insights_y = bottom + EVERGREEN_GAP_ABOVE - scroll_y
     adult_y = insights_y + EVERGREEN_ROW_H + EVERGREEN_GAP_ABOVE
+    retro_y = adult_y + EVERGREEN_ROW_H + EVERGREEN_GAP_ABOVE
     row_w = _ADMIN_X1 - _ADMIN_X0
 
     _evergreen_row(
@@ -552,6 +559,14 @@ def _admin_browser_ass(
         hint="pause, seek, subtitles - no more grown-up overlay" if adult_mode else "unlocks pause, seek & subtitles",
         visible=(body_top <= adult_y + EVERGREEN_ROW_H and adult_y <= body_bottom),
     )
+    if adult_mode:
+        _evergreen_row(
+            parts,
+            x=_ADMIN_X0, y=retro_y, w=row_w,
+            selected=open_retroarch_selected,
+            icon="\U0001F3AE", label="Open RetroArch", hint="games, cores & save states live in its own menu now",
+            visible=(body_top <= retro_y + EVERGREEN_ROW_H and retro_y <= body_bottom),
+        )
 
     max_scroll = max(0, scrollable_content_height(channels) - GRID_H)
     if scroll_y < max_scroll:
@@ -626,11 +641,9 @@ def _episode_progress_marker(
     channel: "Channel", path: "Path", watch_state: Optional["WatchState"]
 ) -> tuple[str, str]:
     """(text, colour) marker for one episode row - a checkmark once watched,
-    a percentage while in progress, or nothing at all (UKE-29). Games have
-    no such state (see watch_state.py's module docstring on why a play
-    count is all RetroArch can offer), so this is always blank for them.
+    a percentage while in progress, or nothing at all (UKE-29).
     """
-    if watch_state is None or channel.config.kind == "game":
+    if watch_state is None:
         return "", ""
     state = watch_state.episode_state(channel.number, channel.config.path, path)
     if state.watched:
@@ -659,7 +672,7 @@ def _admin_episode_list_ass(
     backdrop = _filled_rect(x=0, y=0, w=CANVAS_W, h=CANVAS_H, fill=_ADMIN_BG)
     header = _escape(channel.name)
     total = len(channel.episodes)
-    verb = "Select a game" if channel.config.kind == "game" else "Select an episode"
+    verb = "Select an episode"
     subheader = verb if total <= 1 else f"{verb}  ({(highlight_index or 0) + 1} of {total})"
     footer = "↑↓ move      mute select      power back"
 
@@ -744,19 +757,17 @@ def _admin_insights_ass(summary: "InsightsSummary", suggestions: Sequence[str] =
         )
         return "\n".join(parts)
 
-    # Three headline stats, evenly spaced across the safe width.
-    stat_w = (_ADMIN_X1 - _ADMIN_X0) // 3
+    # Two headline stats, evenly spaced across the safe width.
+    stat_w = (_ADMIN_X1 - _ADMIN_X0) // 2
     parts += _stat_block(_ADMIN_X0, str(summary.total_watched_minutes), "minutes watched")
     parts += _stat_block(_ADMIN_X0 + stat_w, str(summary.total_episodes_watched), "episodes watched")
-    parts += _stat_block(_ADMIN_X0 + stat_w * 2, str(summary.total_games_played), "games played")
 
     # Favorite banner + similar-show suggestions.
     if summary.favorite is not None:
         fav = summary.favorite
-        noun = "game system" if fav.kind == "game" else "show"
         parts.append(
             rf"{{\an7\pos({_ADMIN_X0},{_FAVORITE_Y}){_admin_style(size=24, color=_ADMIN_ACCENT)}}}"
-            f"★ Favorite {noun}: {_escape(fav.name)}"
+            f"★ Favorite show: {_escape(fav.name)}"
         )
         if suggestions:
             text = "Similar: " + ", ".join(suggestions)
@@ -772,11 +783,7 @@ def _admin_insights_ass(summary: "InsightsSummary", suggestions: Sequence[str] =
         rf"{{\an7\pos({_ADMIN_X0},{_PROGRESS_LABEL_Y}){_admin_style(size=18, color=_ADMIN_MUTED, bold=False)}}}"
         "Progress"
     )
-    ranked = sorted(
-        touched,
-        key=lambda c: c.play_count if c.kind == "game" else (c.watched_minutes or 0),
-        reverse=True,
-    )
+    ranked = sorted(touched, key=lambda c: c.watched_minutes, reverse=True)
     green = _hex_to_ass("#4DFF5A")
     for row, ch in enumerate(ranked[:_PROGRESS_MAX_ROWS]):
         y = _PROGRESS_TOP + row * _PROGRESS_ROW_H

@@ -461,39 +461,6 @@ def _all_y_positions(ass: str):
     return [int(m) for m in _re.findall(r"\\pos\(\d+,(-?\d+)\)", ass)]
 
 
-def _config_with_games(tmp_path, *, snes_roms=3, arthur_eps=2):
-    make_show(tmp_path, "a", arthur_eps)
-    make_show(tmp_path, "snes", snes_roms, ext=".sfc")
-    return config_from_dict(
-        {
-            "shuffle_seed": 1,
-            "channels": [{"number": 3, "name": "Arthur", "path": str(tmp_path / "a")}],
-            "games": {
-                "systems": [
-                    {"name": "SNES", "path": str(tmp_path / "snes"), "core": "core.so", "extensions": [".sfc"]}
-                ]
-            },
-        }
-    )
-
-
-def test_admin_browser_shows_game_systems_alongside_channels(tmp_path):
-    from nostalgiabox.channel import build_game_channels, build_lineup
-
-    config = _config_with_games(tmp_path, snes_roms=3, arthur_eps=2)
-    lineup = build_lineup(config)
-    games = build_game_channels(config)
-    tiles = list(lineup) + games
-    player = MockPlayer()
-    om = OverlayManager(player, config, clock=FakeClock())
-    om.show_admin_browser(tiles, highlight_number=games[0].number)
-    ass = player.overlays[5]
-    assert "SNES" in ass
-    assert "3 games" in ass    # game systems count in "games", not "eps"
-    assert "2 eps" in ass      # real channels are unaffected
-    assert "Shows" in ass and "Games" in ass  # section swimlane labels
-
-
 def test_admin_browser_omits_games_section_label_when_there_are_no_games(tmp_path):
     from nostalgiabox.channel import build_lineup
 
@@ -513,24 +480,10 @@ def test_admin_browser_omits_games_section_label_when_there_are_no_games(tmp_pat
     assert "Games" not in ass
 
 
-def test_admin_episode_list_says_select_a_game_for_game_channels(tmp_path):
-    from nostalgiabox.channel import build_game_channels
-
-    config = _config_with_games(tmp_path, snes_roms=2)
-    system = build_game_channels(config)[0]
-    player = MockPlayer()
-    om = OverlayManager(player, config, clock=FakeClock())
-    om.show_admin_episode_list(system, highlight_index=0)
-    ass = player.overlays[5]
-    assert "Select a game" in ass
-    assert "Select an episode" not in ass
-    assert "SNES" in ass
-
-
 def test_admin_episode_list_says_select_an_episode_for_show_channels(tmp_path):
     from nostalgiabox.channel import build_lineup
 
-    config = _config_with_games(tmp_path)
+    config = _config(tmp_path)
     channel = next(c for c in build_lineup(config) if c.number == 3)
     player = MockPlayer()
     om = OverlayManager(player, config, clock=FakeClock())
@@ -572,7 +525,7 @@ def _empty_summary():
 
     return InsightsSummary(
         channels=[], favorite=None, activity=[],
-        total_watched_minutes=0, total_episodes_watched=0, total_games_played=0,
+        total_watched_minutes=0, total_episodes_watched=0,
     )
 
 
@@ -589,12 +542,12 @@ def test_insights_shows_totals_and_favorite(tmp_path):
     from nostalgiabox.watch_state import ChannelInsight, InsightsSummary
 
     fav = ChannelInsight(
-        number=3, name="Arthur", kind="show", watched_count=2, total_count=4,
-        watched_minutes=42, play_count=0, last_played=1000.0,
+        number=3, name="Arthur", watched_count=2, total_count=4,
+        watched_minutes=42, last_played=1000.0,
     )
     summary = InsightsSummary(
         channels=[fav], favorite=fav, activity=[],
-        total_watched_minutes=42, total_episodes_watched=2, total_games_played=0,
+        total_watched_minutes=42, total_episodes_watched=2,
     )
     player = MockPlayer()
     om = OverlayManager(player, _config(tmp_path), clock=FakeClock())
@@ -610,18 +563,18 @@ def test_insights_shows_recent_activity(tmp_path):
     from nostalgiabox.watch_state import ActivityEntry, ChannelInsight, InsightsSummary
 
     fav = ChannelInsight(
-        number=3, name="Arthur", kind="show", watched_count=1, total_count=4,
-        watched_minutes=10, play_count=0, last_played=1000.0,
+        number=3, name="Arthur", watched_count=1, total_count=4,
+        watched_minutes=10, last_played=1000.0,
     )
     activity = [
         ActivityEntry(
-            channel_number=3, channel_name="Arthur", kind="show",
+            channel_number=3, channel_name="Arthur",
             title="Sick as a Dog", when=1000.0, watched=True,
         )
     ]
     summary = InsightsSummary(
         channels=[fav], favorite=fav, activity=activity,
-        total_watched_minutes=10, total_episodes_watched=1, total_games_played=0,
+        total_watched_minutes=10, total_episodes_watched=1,
     )
     player = MockPlayer()
     om = OverlayManager(player, _config(tmp_path), clock=FakeClock())

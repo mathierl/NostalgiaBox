@@ -13,7 +13,7 @@ def build_app(
     tmp_path,
     *,
     assets_dir=None,
-    game_launcher=None,
+    retroarch_launcher=None,
     player_factory=None,
     watch_state=None,
     drm_handoff_delay=0.0,
@@ -42,7 +42,7 @@ def build_app(
         InputManager([]),
         clock=clock,
         assets_dir=assets_dir,
-        game_launcher=game_launcher,
+        retroarch_launcher=retroarch_launcher,
         player_factory=player_factory,
         watch_state=watch_state,
         drm_handoff_delay=drm_handoff_delay,
@@ -553,7 +553,6 @@ def test_insights_with_nothing_watched_is_empty_but_valid(tmp_path):
     summary, suggestions = app._current_insights()
     assert summary.total_watched_minutes == 0
     assert summary.total_episodes_watched == 0
-    assert summary.total_games_played == 0
     assert summary.favorite is None
     assert summary.activity == []
     assert suggestions == []
@@ -974,105 +973,69 @@ def test_admin_grid_scrolls_when_the_cursor_reaches_a_row_below_the_fold(tmp_pat
     assert app._scroll_y < scrolled_y
 
 
-# -- games: admin-mode arcade via RetroArch (UKE-28) -------------------------
-# Games are a second kind of admin-grid tile, alongside real channels (see
-# TVApp._admin_tiles): a "system" (SNES) behaves like a channel, and its ROMs
-# behave like episodes, reusing the exact same grid / numbered-list nav. The
-# one thing that's genuinely different is confirming a selection: a video
-# episode plays and exits back to normal viewing, but a game hands the
-# display to RetroArch (via the injectable game_launcher). This is the one
-# remaining place mpv actually closes (see app.py's module docstring) -
-# de-risked on real hardware by scripts/spike_mpv_retroarch_handoff.py.
+# -- Open RetroArch (UKE-29 v2) ----------------------------------------------
+# Games used to be a second kind of admin-grid tile (UKE-28), browsed and
+# launched per-ROM. That's gone - Adult Mode's grid now gets a plain "Open
+# RetroArch" row (only present once Adult Mode is on) that hands the whole
+# display to RetroArch's own menu, no arguments at all (via the injectable
+# retroarch_launcher). This is still the one remaining place mpv actually
+# closes (see app.py's module docstring) - de-risked on real hardware by
+# scripts/spike_mpv_retroarch_handoff.py.
 
 
-def _games_override(tmp_path, *, roms=2, ext=".sfc", core="/cores/snes9x.so"):
-    make_show(tmp_path, "snes", roms, ext=ext)
-    return {
-        "games": {
-            "systems": [
-                {"name": "SNES", "path": str(tmp_path / "snes"), "core": core, "extensions": [ext]}
-            ]
-        }
-    }
+def _walk_to_open_retroarch(app):
+    for _ in range(8):
+        if app._current_section() == "open_retroarch":
+            return
+        send(app, Action.CHANNEL_DOWN)
+    raise AssertionError("never reached the open retroarch row")
 
 
-def test_game_system_appears_in_admin_grid(tmp_path):
-    app, player, _ = build_app(tmp_path, **_games_override(tmp_path, roms=2))
+def test_open_retroarch_row_only_appears_once_adult_mode_is_on(tmp_path):
+    app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
+    assert "open_retroarch" not in app._section_keys()
+    panel = player.overlays.get(5, "") or ""
+    assert "Open RetroArch" not in panel
+
+    _walk_to_adult_toggle(app)
+    send(app, Action.MUTE)  # turn Adult Mode on
+    assert "open_retroarch" in app._section_keys()
+    _walk_to_open_retroarch(app)
     panel = player.overlays.get(5, "")
-    assert "SNES" in panel
-    assert "2 games" in panel
-    assert app.games[0].number == 5  # continues on from the highest real channel (4)
+    assert "Open RetroArch" in panel
 
 
-def test_can_navigate_onto_and_into_a_game_system(tmp_path):
-    app, player, _ = build_app(tmp_path, **_games_override(tmp_path))
-    app.start()
-    send(app, Action.ADMIN_TOGGLE)
-    # Shows row = [2, 3, 4], Games row = [5 (SNES)] - Channel Down moves
-    # between rows, landing on the first tile of the row below.
-    send(app, Action.CHANNEL_DOWN)
-    assert app._browse_number == 5
-    send(app, Action.MUTE)  # confirm SNES -> its game list
-    assert app.admin_episode_browsing
-    assert app._browse_episode_number == 5
-    panel = player.overlays.get(5, "")
-    assert "SNES" in panel and "Select a game" in panel
-
-
-def test_confirming_a_game_calls_the_launcher_and_stays_on_the_list(tmp_path):
+def test_confirming_open_retroarch_calls_the_launcher_and_returns_to_the_grid(tmp_path):
     calls = []
 
-    def fake_launcher(core, rom):
-        calls.append((core, rom))
+    def fake_launcher():
+        calls.append(True)
         return 0
 
-    app, player, _ = build_app(
-        tmp_path, game_launcher=fake_launcher, **_games_override(tmp_path, roms=2)
-    )
+    app, player, _ = build_app(tmp_path, retroarch_launcher=fake_launcher)
     app.start()
     playing = player.current
     player.time_pos = 12.0
     send(app, Action.ADMIN_TOGGLE)  # captures pre_admin_path/pos
-    send(app, Action.CHANNEL_DOWN)
-    send(app, Action.VOLUME_UP)  # cursor -> SNES (5)
-    send(app, Action.MUTE)  # into SNES's game list
-    rom = app.games[0].episodes[0]
+    _walk_to_adult_toggle(app)
+    send(app, Action.MUTE)  # turn Adult Mode on
+    _walk_to_open_retroarch(app)
 
-    send(app, Action.MUTE)  # confirm the first game
+    send(app, Action.MUTE)  # confirm - hands off to RetroArch
 
-    assert calls == [("/cores/snes9x.so", rom)]
-    # Stayed on exactly the same game list - unlike picking a show episode,
-    # nothing "started playing" in the mpv sense.
-    assert app.admin_episode_browsing
-    assert app._browse_episode_number == 5
+    assert calls == [True]
+    # Back on the grid, same admin session it was opened from.
+    assert app.admin_browsing
     assert app.admin_mode
-    # The video playing before admin mode opened is untouched by the game -
-    # launching a game must not clear the "nothing new is playing" resume state.
+    # The video playing before admin mode opened is untouched -
+    # opening RetroArch must not clear the "nothing new is playing" resume state.
     assert app._pre_admin_path == playing
     assert app._pre_admin_pos == 12.0
 
 
-def test_confirming_a_second_game_works_after_returning_to_the_list(tmp_path):
-    calls = []
-    app, player, _ = build_app(
-        tmp_path,
-        game_launcher=lambda core, rom: calls.append(rom) or 0,
-        **_games_override(tmp_path, roms=2),
-    )
-    app.start()
-    send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.CHANNEL_DOWN)
-    send(app, Action.VOLUME_UP)
-    send(app, Action.MUTE)  # into SNES's game list
-    send(app, Action.MUTE)  # play game 1
-    send(app, Action.CHANNEL_DOWN)  # move to game 2
-    send(app, Action.MUTE)  # play game 2
-    assert calls == list(app.games[0].episodes)  # both, in order
-
-
-def test_game_launch_stops_and_recreates_player_via_factory(tmp_path):
+def test_open_retroarch_stops_and_recreates_player_via_factory(tmp_path):
     created = []
 
     def factory():
@@ -1082,15 +1045,14 @@ def test_game_launch_stops_and_recreates_player_via_factory(tmp_path):
 
     app, player1, _ = build_app(
         tmp_path,
-        game_launcher=lambda core, rom: 0,
+        retroarch_launcher=lambda: 0,
         player_factory=factory,
-        **_games_override(tmp_path),
     )
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.CHANNEL_DOWN)
-    send(app, Action.VOLUME_UP)
-    send(app, Action.MUTE)  # into SNES's game list
+    _walk_to_adult_toggle(app)
+    send(app, Action.MUTE)
+    _walk_to_open_retroarch(app)
     send(app, Action.MUTE)  # confirm and launch
 
     assert player1.closed is True
@@ -1102,45 +1064,27 @@ def test_game_launch_stops_and_recreates_player_via_factory(tmp_path):
     assert app.player.muted == app.muted
 
 
-def test_game_launch_without_a_player_factory_reuses_the_same_player(tmp_path):
+def test_open_retroarch_without_a_player_factory_reuses_the_same_player(tmp_path):
     # No factory (the common case in tests / a dry run) - the same player
     # instance is kept, just close()d then reused for the grid image again.
-    app, player, _ = build_app(
-        tmp_path, game_launcher=lambda core, rom: 0, **_games_override(tmp_path)
-    )
+    app, player, _ = build_app(tmp_path, retroarch_launcher=lambda: 0)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.CHANNEL_DOWN)
-    send(app, Action.VOLUME_UP)
+    _walk_to_adult_toggle(app)
     send(app, Action.MUTE)
+    _walk_to_open_retroarch(app)
     send(app, Action.MUTE)
     assert app.player is player
     assert player.closed is True
 
 
-def test_launch_game_with_no_core_configured_is_a_no_op(tmp_path):
-    # Not reachable through normal config (kind="game" requires 'core' - see
-    # config.py's ChannelConfig validation) - this exercises _launch_game's
-    # own defensive guard directly.
-    from nostalgiabox.channel import Channel
-    from nostalgiabox.config import ChannelConfig
-
-    calls = []
-    app, player, _ = build_app(tmp_path, game_launcher=lambda c, r: calls.append((c, r)))
-    bad_cfg = ChannelConfig(number=99, name="Broken", path=tmp_path)  # kind defaults to "show", core=None
-    channel = Channel(bad_cfg, [])
-    app._launch_game(channel, tmp_path / "rom.sfc")
-    assert calls == []
-    assert player.closed is False  # bailed out before touching the player
-
-
 def test_show_episodes_still_exit_admin_browsing_normally(tmp_path):
-    # Regression guard: mixing games into _admin_tiles/_confirm_episode_selection
-    # must not change how picking an ordinary show episode behaves.
-    app, player, _ = build_app(tmp_path, **_games_override(tmp_path))
+    # Regression guard: adding the Open RetroArch row must not change how
+    # picking an ordinary show episode behaves.
+    app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.MUTE)  # confirm Dragon Tales (still the first real channel)
+    send(app, Action.MUTE)  # confirm Dragon Tales (the first real channel)
     send(app, Action.MUTE)  # confirm an episode
     assert not app.admin_episode_browsing
     assert not app.admin_browsing
@@ -1148,57 +1092,55 @@ def test_show_episodes_still_exit_admin_browsing_normally(tmp_path):
     assert player.current is not None
 
 
-def test_drm_handoff_delay_pauses_around_a_game_launch(tmp_path, monkeypatch):
+def test_drm_handoff_delay_pauses_around_opening_retroarch(tmp_path, monkeypatch):
     # Real-hardware regression (UKE-29): the DRM master race that segfaulted
     # the box when a second process (the now-reverted browser admin UI) had
     # to fight mpv for the display. The one remaining display handoff -
-    # launching a game via RetroArch - gets the same defensive pause as
-    # cheap insurance, even though it was separately validated safe without
-    # it (scripts/spike_mpv_retroarch_handoff.py).
+    # opening RetroArch - gets the same defensive pause as cheap insurance,
+    # even though it was separately validated safe without it
+    # (scripts/spike_mpv_retroarch_handoff.py).
     sleeps = []
     monkeypatch.setattr("nostalgiabox.app.time.sleep", lambda s: sleeps.append(s))
     app, player, _ = build_app(
         tmp_path,
-        game_launcher=lambda core, rom: 0,
+        retroarch_launcher=lambda: 0,
         player_factory=MockPlayer,
         drm_handoff_delay=0.5,
-        **_games_override(tmp_path),
     )
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.CHANNEL_DOWN)
-    send(app, Action.VOLUME_UP)
-    send(app, Action.MUTE)  # into SNES's game list
+    _walk_to_adult_toggle(app)
+    send(app, Action.MUTE)
+    _walk_to_open_retroarch(app)
     send(app, Action.MUTE)  # confirm and launch
     # once before handing off to RetroArch, once before rebuilding mpv
     assert sleeps == [0.5, 0.5]
 
 
-def test_drm_handoff_delay_defaults_to_no_pause_around_game_launch(tmp_path, monkeypatch):
+def test_drm_handoff_delay_defaults_to_no_pause_around_opening_retroarch(tmp_path, monkeypatch):
     # The default (used by every other test, and by dry-run) - there's no
     # real DRM device to race over, and a real sleep would only slow things
     # down for no benefit.
     sleeps = []
     monkeypatch.setattr("nostalgiabox.app.time.sleep", lambda s: sleeps.append(s))
     app, player, _ = build_app(
-        tmp_path, game_launcher=lambda core, rom: 0, player_factory=MockPlayer, **_games_override(tmp_path)
+        tmp_path, retroarch_launcher=lambda: 0, player_factory=MockPlayer
     )
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.CHANNEL_DOWN)
-    send(app, Action.VOLUME_UP)
+    _walk_to_adult_toggle(app)
     send(app, Action.MUTE)
+    _walk_to_open_retroarch(app)
     send(app, Action.MUTE)
     assert sleeps == []
 
 
-# -- watch state: continue-watching / watched / play tracking (UKE-29) ------
+# -- watch state: continue-watching / watched tracking (UKE-29) -------------
 # None by default (build_app doesn't pass one unless a test opts in), so the
 # many tests above never touch disk. These tests explicitly construct a
 # WatchState under tmp_path and pass it in to exercise the real hooks:
-# _record_watch_progress (channel change / standby), _mark_current_watched
-# (natural end-of-file), and the game-launch played/play_count tracking in
-# _launch_game.
+# _record_watch_progress (channel change / standby) and _mark_current_watched
+# (natural end-of-file).
 
 
 def test_no_watch_state_configured_is_a_no_op(tmp_path):
@@ -1285,28 +1227,6 @@ def test_episode_error_is_not_marked_watched(tmp_path):
     app._drain_playback_events()
     state = ws.episode_state(channel.number, channel.config.path, playing)
     assert state.watched is False
-
-
-def test_confirming_a_game_records_played_and_play_count(tmp_path):
-    ws = WatchState(tmp_path / "watch_state.json")
-    app, player, _ = build_app(
-        tmp_path, watch_state=ws, game_launcher=lambda c, r: 0, **_games_override(tmp_path)
-    )
-    app.start()
-    send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.CHANNEL_DOWN)
-    send(app, Action.VOLUME_UP)  # cursor -> SNES
-    send(app, Action.MUTE)  # into SNES's game list
-    send(app, Action.MUTE)  # confirm and launch the first game
-
-    system = app.games[0]
-    rom = system.episodes[0]
-    state = ws.game_state(system.number, system.config.path, rom)
-    assert state.played is True
-    assert state.play_count == 1
-
-    send(app, Action.MUTE)  # play it again
-    assert ws.game_state(system.number, system.config.path, rom).play_count == 2
 
 
 def test_watch_state_survives_across_app_restarts(tmp_path, monkeypatch):
@@ -1443,19 +1363,20 @@ def test_continue_entries_recomputed_on_reopening_admin_mode(tmp_path):
 
 # -- Netflix-style swimlane redesign (UKE-29) --------------------------------
 # The admin browse screen is a stack of independent single-row "sections" -
-# Continue Watching, Shows, Games (each only present if non-empty), then the
-# always-present Insights row. Channel Up/Down move between rows and stop at
-# the top/bottom; Volume Up/Down move within a row, wrapping at its ends;
-# moving onto a new row always lands on its first tile.
+# Continue Watching, Shows (each only present if non-empty), then the
+# always-present Insights/Adult Mode rows, then (once Adult Mode is on)
+# Open RetroArch. Channel Up/Down move between rows and stop at the top/
+# bottom; Volume Up/Down move within a row, wrapping at its ends; moving
+# onto a new row always lands on its first tile.
 
 
 def test_channel_down_walks_through_every_present_section(tmp_path):
     ws = WatchState(tmp_path / "watch_state.json")
-    app, player, _ = build_app(tmp_path, watch_state=ws, **_games_override(tmp_path))
+    app, player, _ = build_app(tmp_path, watch_state=ws)
     app.start()
     _seed_in_progress(app, ws, 3)
     send(app, Action.ADMIN_TOGGLE)
-    assert app._section_keys() == ["continue", "shows", "games", "insights", "adult_toggle"]
+    assert app._section_keys() == ["continue", "shows", "insights", "adult_toggle"]
     assert app._current_section() == "shows"  # opening always lands on the grid, not the row
 
     send(app, Action.CHANNEL_UP)
@@ -1467,21 +1388,15 @@ def test_channel_down_walks_through_every_present_section(tmp_path):
     assert app._current_section() == "shows"
     assert app._browse_number == 2  # landed on the row's first tile
     send(app, Action.CHANNEL_DOWN)
-    assert app._current_section() == "games"
-    assert app._browse_number == 5  # SNES, the games row's first (only) tile
-    send(app, Action.CHANNEL_DOWN)
     assert app._current_section() == "insights"
     send(app, Action.CHANNEL_DOWN)
     assert app._current_section() == "adult_toggle"
     send(app, Action.CHANNEL_DOWN)
-    assert app._current_section() == "adult_toggle"  # bottommost row - nowhere further down
+    assert app._current_section() == "adult_toggle"  # bottommost row - Open RetroArch isn't present yet
 
-
-def test_volume_wraps_within_the_games_row(tmp_path):
-    app, player, _ = build_app(tmp_path, **_games_override(tmp_path, roms=2))
-    app.start()
-    send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.CHANNEL_DOWN)  # onto the (single-system) Games row
-    assert app._browse_number == 5
-    send(app, Action.VOLUME_UP)
-    assert app._browse_number == 5  # only one game system - wraps to itself
+    send(app, Action.MUTE)  # turn Adult Mode on from the toggle row
+    assert app._section_keys() == ["continue", "shows", "insights", "adult_toggle", "open_retroarch"]
+    send(app, Action.CHANNEL_DOWN)
+    assert app._current_section() == "open_retroarch"  # now reachable
+    send(app, Action.CHANNEL_DOWN)
+    assert app._current_section() == "open_retroarch"  # still the bottommost row
