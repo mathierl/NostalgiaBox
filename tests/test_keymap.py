@@ -115,6 +115,34 @@ def test_parse_key_overrides_admin_toggle():
     assert ov["KEY_F6"].action == Action.ADMIN_TOGGLE
 
 
+def test_evdev_seek_keys():
+    # UKE-29 v3: a dedicated seek control, distinct from Channel/Volume, so
+    # a D-pad's left/right can be trained to keys that don't collide with
+    # KEY_LEFT/KEY_RIGHT (already Volume).
+    assert evdev_key_to_event("KEY_F").action == Action.SEEK_FORWARD
+    assert evdev_key_to_event("KEY_R").action == Action.SEEK_BACKWARD
+    assert evdev_key_to_event("KEY_FASTFORWARD").action == Action.SEEK_FORWARD
+    assert evdev_key_to_event("KEY_REWIND").action == Action.SEEK_BACKWARD
+
+
+def test_stdin_seek_chars():
+    assert stdin_char_to_event("f").action == Action.SEEK_FORWARD
+    assert stdin_char_to_event("F").action == Action.SEEK_FORWARD
+    assert stdin_char_to_event("r").action == Action.SEEK_BACKWARD
+    assert stdin_char_to_event("R").action == Action.SEEK_BACKWARD
+
+
+def test_parse_key_overrides_seek():
+    ov = parse_key_overrides({"KEY_F7": "seek_forward", "KEY_F8": "seek_backward"})
+    assert ov["KEY_F7"].action == Action.SEEK_FORWARD
+    assert ov["KEY_F8"].action == Action.SEEK_BACKWARD
+
+
+def test_cec_seek_keys():
+    assert cec_key_to_event("fast forward").action == Action.SEEK_FORWARD
+    assert cec_key_to_event("rewind").action == Action.SEEK_BACKWARD
+
+
 def test_keyboard_backend_accepts_admin_hold_seconds():
     from nostalgiabox.input.keyboard import KeyboardBackend
 

@@ -139,9 +139,11 @@ scan_recursive: true      # also look inside season sub-folders for episodes
 # configure for that.
 admin_mode_enabled: true    # set false to remove the feature entirely
 admin_hold_seconds: 3.0     # how long to hold Power to trigger it (0.5-15)
-# Once Adult Mode is on and something's playing (not browsing), Channel
-# Up/Down skip forward/backward by this many seconds instead of changing
-# channels - a grown-up-only seek control (1-300).
+# Once Adult Mode is on and something's playing (not browsing), the dedicated
+# seek control (D-pad left/right, seek_forward/seek_backward) skips
+# forward/backward by this many seconds (1-300). Channel Up/Down, Volume
+# Up/Down, and Mute always keep their normal literal meaning - Adult Mode
+# never repurposes them.
 admin_seek_seconds: 10.0
 # Subtitles on/off at boot. Toggled live via the Info button while Adult Mode
 # is on and something's playing.
@@ -182,8 +184,9 @@ input:
 
   # Map specific keys to actions (handy for odd remotes). Find a button's key
   # name with `sudo evtest`. Actions: channel_up, channel_down, volume_up,
-  # volume_down, mute, enter, info, last_channel, power, admin_toggle, quit,
-  # digit_0..digit_9, or none (to unbind). Example for a Logitech R400 presenter.
+  # volume_down, mute, enter, seek_forward, seek_backward, info, last_channel,
+  # power, admin_toggle, quit, digit_0..digit_9, or none (to unbind).
+  # Example for a Logitech R400 presenter.
   # NOTE: its play-screen button sends Escape (the quit key!), so remap
   # KEY_ESC too or it will shut the box off.
   # key_overrides:

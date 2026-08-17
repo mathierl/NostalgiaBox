@@ -170,14 +170,16 @@ leave out specific seasons/specials per channel — see `exclude_seasons` and
 
 ### Part G — Program the remote (Flirc)
 
-The **Flirc** adapter learns your Simple TV Remote and turns its buttons into
-keys NostalgiaBox understands. Do this **on your computer**:
+The **Flirc** adapter learns your remote and turns its buttons into keys
+NostalgiaBox understands. Do this **on your computer**:
 
 1. Unplug the Flirc from the Pi and plug it into your computer.
 2. Install the **Flirc** app from [flirc.tv/downloads](https://flirc.tv/pages/downloads).
 3. In the app, choose the **Full Keyboard** controller.
-4. Click a key on the on-screen keyboard, then press the button on your Simple TV
-   Remote you want to use for it. Map these:
+4. Click a key on the on-screen keyboard, then press the button on your remote
+   you want to use for it. Every action has exactly one meaning, everywhere -
+   nothing is contextually repurposed - so once trained, these buttons just
+   work. Map these:
 
    | Click this on-screen key | Press this remote button | Does |
    |--------------------------|--------------------------|------|
@@ -187,6 +189,14 @@ keys NostalgiaBox understands. Do this **on your computer**:
    | **Left arrow (←)** | Volume-Down button  | Volume down |
    | **m**              | Mute button         | Mute |
    | **p**              | Power button        | Standby (blank the screen) |
+   | **Enter**          | D-pad center/OK button | Confirm selection; pause/play once watching under Adult Mode |
+   | **f**              | D-pad right button  | Seek forward (grid nav while browsing; skip ahead under Adult Mode) |
+   | **r**              | D-pad left button   | Seek backward (grid nav while browsing; skip back under Adult Mode) |
+   | **l**              | Back button         | Last channel (jumps to current show's episode list under Adult Mode) |
+   | **i**              | Home button         | Info / subtitle toggle under Adult Mode |
+
+   Leave the D-pad's Up/Down buttons untrained for now - they don't map to
+   anything yet.
 
 5. Unplug the Flirc from your computer and plug it back into the Pi.
 
@@ -250,6 +260,8 @@ Kids will unplug it. Two things keep the SD card from getting corrupted:
 | Change channels | Channel up / down |
 | Adjust volume | Volume up / down |
 | Mute | Mute |
+| Seek / navigate (see Adult Mode) | D-pad left / right |
+| Pause / play (see Adult Mode) | D-pad OK |
 | Standby (blank screen) | Power |
 | **Turn off** (safe to unplug) | Volume-down again when already at 0 |
 | **Admin/developer view** (grown-ups only) | Hold Power for ~3 seconds |
@@ -268,9 +280,10 @@ a fixed, comfortable size rather than shrinking to cram everything into one
 row. It's a two-step browser:
 
 1. **Show grid.** **Channel Up/Down** moves the selection up/down a row,
-   **Volume Up/Down** moves it left/right within a row, scrolling as needed
-   to keep the highlight on screen (this is just navigation - nothing
-   changes yet). Below the real channels sit two rows that are always there
+   **Volume Up/Down** or the **D-pad left/right** (either works) moves it
+   left/right within a row, scrolling as needed to keep the highlight on
+   screen (this is just navigation - nothing changes yet). Below the real
+   channels sit two rows that are always there
    regardless of what's configured: **Watch Insights** (see below) and an
    **Adult Mode** toggle. **Mute** confirms whatever's highlighted - a show
    opens its episode list, Insights opens the stats screen, and the Adult
@@ -300,20 +313,26 @@ reset by standby, see below).
 
 While Adult Mode is on and you're just watching (not browsing):
 
-- **Mute** becomes **pause/play** - a control the kid remote never exposes,
-  since a small kid pausing the TV mid-show tends to end in tears.
-- **Channel Up/Down** skips forward/backward within the current episode by
-  `admin_seek_seconds` (default `10.0`) instead of changing the channel,
+- **D-pad OK/Enter** becomes **pause/play** - a control the kid remote never
+  exposes, since a small kid pausing the TV mid-show tends to end in tears.
+- **D-pad left/right** (the dedicated seek control) skips forward/backward
+  within the current episode by `admin_seek_seconds` (default `10.0`),
   shown as a "»"/"«" OSD message with the resulting position.
 - **Info** toggles subtitles on/off instead of flashing the channel banner.
 - **Back/Last-channel** jumps straight into the current show's episode list
   - a one-button shortcut for switching to a different episode without first
   reopening the whole grid.
 
+**Channel Up/Down, Volume Up/Down, and Mute always keep their normal literal
+meaning, in every mode** - Adult Mode never repurposes them, so a kid (or
+anyone else) picking up the remote can always change the channel, adjust
+volume, or mute, exactly as expected. Only the D-pad's OK button and its
+left/right seek control change behavior, and only while actually watching
+under Adult Mode.
+
 Every one of these shows a brief on-screen message and nothing more - the
 same transient style as the volume bar - so there's never a persistent panel
-glued to the picture. To actually change the channel or use Back/Last-channel
-normally again, turn Adult Mode off from the grid first.
+glued to the picture.
 
 A couple of notes:
 
@@ -399,7 +418,7 @@ channel_bug_seconds: 4   # how long the channel banner lingers
 initial_volume: 70       # 0-100
 admin_mode_enabled: true # hidden grown-ups view (posters, episode picker, Adult Mode)
 admin_hold_seconds: 3.0  # how long to hold Power to open it
-admin_seek_seconds: 10.0 # Adult Mode's Channel Up/Down scrub size, 1-300
+admin_seek_seconds: 10.0 # Adult Mode's D-pad seek skip size, 1-300
 subtitles_default: false # subtitles on/off at boot; toggled via Info in Adult Mode
 audio_device: "..."      # force HDMI audio (see Part H)
 

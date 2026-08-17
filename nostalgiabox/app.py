@@ -41,17 +41,27 @@ mode itself - three distinct states rather than one overloaded flag:
   toggle row inside the grid (alongside Insights - see ``_confirm_adult_
   toggle``), that survives closing the grid and channel changes until
   turned off again (or standby). While it's on and nothing's being
-  browsed, Mute/Channel-Up-Down/Info are repurposed into pause/seek/
-  subtitle-toggle - a grown-up-only control surface the kid remote never
-  exposes - but *unlike* the flag this replaced, nothing is left glued to
-  the screen: no persistent corner panel, just the same brief OSD messages
-  every other action already uses. Back/Last-Channel, repurposed the same
-  way, reopens the grid straight into the current show's episode list for
-  a quick episode switch (see ``_jump_last_channel``). Adult Mode is only
+  browsed, Info/Back-Last-Channel/OK are repurposed into subtitle-toggle/
+  quick-episode-switch/pause - a grown-up-only control surface the kid
+  remote never exposes - but *unlike* the flag this replaced, nothing is
+  left glued to the screen: no persistent corner panel, just the same
+  brief OSD messages every other action already uses. Adult Mode is only
   ever turned off from its own toggle row inside the grid (or reset
   outright by standby, the kid-proof reset point - see _toggle_standby) -
   long-press Power (``ADMIN_TOGGLE``) still just opens/closes the grid
   itself, exactly as before.
+
+A third UKE-29 pass (v3) gave seeking and pausing their own dedicated
+controls instead of overloading Channel Up/Down and Mute: a real remote's
+D-pad (or dedicated FF/RW buttons) drives ``SEEK_FORWARD``/
+``SEEK_BACKWARD`` - grid horizontal nav while browsing (same job Volume
+Up/Down already does), skip forward/back under Adult Mode while watching
+(see ``_seek_forward``/``_seek_backward``/``_seek_or_navigate``) - and
+Channel Up/Down and Mute go back to *always* meaning "change channel" and
+"mute", in every mode, never repurposed. Pause/play moved onto OK/Enter
+instead (see ``_handle_enter``), which was otherwise mostly idle (it only
+ever confirmed a typed channel number, of limited use on a remote with no
+digit pad).
 
 The browse grid can also now be taller than one screen (posters keep a
 fixed comfortable size and wrap onto more rows instead of shrinking - see
@@ -435,7 +445,9 @@ class TVApp:
             Action.MUTE: self._toggle_mute,
             Action.INFO: self._show_info,
             Action.LAST_CHANNEL: self._jump_last_channel,
-            Action.ENTER: self._confirm_digits,
+            Action.SEEK_FORWARD: self._seek_forward,
+            Action.SEEK_BACKWARD: self._seek_backward,
+            Action.ENTER: self._handle_enter,
             Action.ADMIN_TOGGLE: self._toggle_admin_mode,
         }
         if action == Action.DIGIT:
@@ -456,15 +468,11 @@ class TVApp:
         if self.admin_insights_viewing:
             # Read-only screen - nothing to move/change.
             return
-        if self.adult_mode:
-            # Once something's actually playing under Adult Mode (not a
-            # browse screen), Channel Up/Down are repurposed into seek - a
-            # grown-up-only control, same spirit as Mute becoming pause/play
-            # here (UKE-29; see the module docstring for the Kid/Admin/Adult
-            # picture - gated on adult_mode now, not the old admin_mode flag,
-            # which only ever means "a browse screen is open").
-            self._seek(self.config.admin_seek_seconds)
-            return
+        # Always a literal channel change now (UKE-29 v3) - Channel Up/Down
+        # used to be repurposed into seek under Adult Mode, but that
+        # overloaded the one physical control a lot of remotes only have for
+        # surfing channels. Seeking has its own dedicated control now - see
+        # _seek_forward/_seek_backward.
         self._remember_position()
         self._last_channel_number = self.lineup.current.number
         self.lineup.up()
@@ -479,20 +487,41 @@ class TVApp:
             return
         if self.admin_insights_viewing:
             return
-        if self.adult_mode:
-            self._seek(-self.config.admin_seek_seconds)
-            return
         self._remember_position()
         self._last_channel_number = self.lineup.current.number
         self.lineup.down()
         self.tune_current()
 
+    def _seek_forward(self) -> None:
+        self._seek_or_navigate(1)
+
+    def _seek_backward(self) -> None:
+        self._seek_or_navigate(-1)
+
+    def _seek_or_navigate(self, direction: int) -> None:
+        """The dedicated seek control (UKE-29 v3, e.g. a D-pad's left/right -
+        kept distinct from Volume Up/Down and Channel Up/Down so all three
+        can keep their own, non-overloaded meaning): grid horizontal nav
+        while browsing (mirrors Volume Up/Down exactly), otherwise a
+        grown-up-only skip forward/backward while actually watching under
+        Adult Mode - a no-op everywhere else (Kid Mode, or Adult Mode off),
+        so a kid holding this remote can't scrub playback.
+        """
+        if self.admin_browsing:
+            self._move_browse_cursor(dcol=direction)
+            return
+        if self.admin_episode_browsing or self.admin_insights_viewing:
+            return
+        if self.adult_mode:
+            self._seek(direction * self.config.admin_seek_seconds)
+
     def _seek(self, delta: float) -> None:
         """Skip forward (positive) or backward (negative) within the
-        currently playing episode - admin mode only (see _channel_up/
-        _channel_down), a grown-up-only control the kid-facing remote never
-        exposes. Shows the resulting position as a brief OSD message so the
-        grown-up gets feedback even though there's no visible seek bar.
+        currently playing episode - only ever called while Adult Mode is on
+        and something's actually playing (see _seek_or_navigate), a
+        grown-up-only control the kid-facing remote never exposes. Shows the
+        resulting position as a brief OSD message so the grown-up gets
+        feedback even though there's no visible seek bar.
         """
         self.player.seek(delta)
         arrow = "»" if delta >= 0 else "«"  # » forward / « backward
@@ -687,9 +716,9 @@ class TVApp:
 
     def _toggle_mute(self) -> None:
         # In the admin view, Mute is repurposed: it confirms whatever's
-        # highlighted in the show grid or episode list, otherwise it's
-        # pause/play (a capability the kid-facing remote never exposes).
-        # Everywhere else it behaves exactly as before.
+        # highlighted in the show grid or episode list. Everywhere else
+        # it's always a literal mute now (UKE-29 v3) - pause/play moved to
+        # OK/Enter (see _handle_enter) so Mute never stops meaning "mute".
         if self.admin_episode_browsing:
             self._confirm_episode_selection()
             return
@@ -708,9 +737,6 @@ class TVApp:
         if self.admin_insights_viewing:
             # Read-only screen - Power is the only thing that does anything
             # here (see _admin_back_from_insights).
-            return
-        if self.adult_mode:
-            self._toggle_pause()
             return
         self.muted = not self.muted
         self.player.set_mute(self.muted)
@@ -1269,6 +1295,18 @@ class TVApp:
         else:
             self.overlay.clear_standby()
             self.tune_current(show_static=False)
+
+    def _handle_enter(self) -> None:
+        """OK/Enter (UKE-29 v3): pause/play while actually watching under
+        Adult Mode - moved off Mute (see _toggle_mute) so Mute never stops
+        meaning "mute". Everywhere else this is what it always was:
+        confirming a typed channel number (see _confirm_digits) - a no-op if
+        nothing's been typed, e.g. on a remote with no digit pad.
+        """
+        if self.adult_mode and not self.admin_mode:
+            self._toggle_pause()
+            return
+        self._confirm_digits()
 
     # -- direct channel entry ----------------------------------------------
     def _push_digit(self, digit: int) -> None:

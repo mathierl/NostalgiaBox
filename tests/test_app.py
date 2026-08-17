@@ -378,6 +378,23 @@ def test_volume_up_down_move_within_a_row(tmp_path):
     assert app._browse_number == 4
 
 
+def test_seek_forward_backward_also_move_within_a_row_while_browsing(tmp_path):
+    # The dedicated seek control (UKE-29 v3, e.g. a D-pad's left/right)
+    # mirrors Volume Up/Down's grid-horizontal-nav job exactly while
+    # browsing, so either physical control works for moving across the row.
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.SEEK_FORWARD)
+    assert app._browse_number == 3
+    send(app, Action.SEEK_FORWARD)
+    assert app._browse_number == 4
+    send(app, Action.SEEK_FORWARD)
+    assert app._browse_number == 2  # wraps back
+    send(app, Action.SEEK_BACKWARD)
+    assert app._browse_number == 4
+
+
 def test_mute_on_grid_opens_episode_list_without_tuning(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
@@ -581,23 +598,39 @@ def test_browsing_without_picking_anything_resumes_on_exit(tmp_path):
     assert player.played[-1] == (playing, 17.5)
 
 
-def test_mute_becomes_pause_play_once_watching(tmp_path):
-    # Pause/play via Mute is an Adult Mode control (UKE-29, see the module
-    # docstring) - it does nothing special in Kid Mode (see
-    # test_kid_mode_mute_stays_a_real_mute_even_after_watching_an_episode).
+def test_enter_becomes_pause_play_once_watching(tmp_path):
+    # Pause/play via OK/Enter is an Adult Mode control (UKE-29 v3, see the
+    # module docstring) - it does nothing special in Kid Mode. Moved off
+    # Mute so Mute never stops meaning "mute" (see the test right below).
     app, player, _ = build_app(tmp_path)
     app.start()
     app.adult_mode = True
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.MUTE)  # confirm show
     send(app, Action.MUTE)  # confirm episode -> now watching
-    send(app, Action.MUTE)  # pause
+    send(app, Action.ENTER)  # pause
     assert app.paused is True
     assert player.paused is True
     assert player.muted is False  # never touched the real mute
-    send(app, Action.MUTE)
+    send(app, Action.ENTER)
     assert app.paused is False
     assert player.paused is False
+
+
+def test_mute_always_stays_a_real_mute_even_under_adult_mode(tmp_path):
+    # UKE-29 v3 regression guard: Mute used to become pause/play under Adult
+    # Mode - that's OK/Enter's job now (see the test right above), so Mute
+    # is always a literal mute, in every mode.
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    app.adult_mode = True
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm show
+    send(app, Action.MUTE)  # confirm episode -> now watching
+    send(app, Action.MUTE)
+    assert app.muted is True
+    assert player.muted is True
+    assert app.paused is False
 
 
 def test_kid_mode_mute_stays_a_real_mute_even_after_watching_an_episode(tmp_path):
@@ -628,7 +661,7 @@ def test_exiting_admin_mode_under_adult_mode_preserves_pause_with_no_panel_left_
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.MUTE)  # confirm show
     send(app, Action.MUTE)  # confirm episode
-    send(app, Action.MUTE)  # pause
+    send(app, Action.ENTER)  # pause
     assert app.paused
     send(app, Action.ADMIN_TOGGLE)  # reopen the grid...
     assert app.admin_mode
@@ -649,18 +682,17 @@ def test_changing_channel_while_watching_unpauses_and_shows_channel_bug(tmp_path
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.MUTE)  # confirm show
     send(app, Action.MUTE)  # confirm episode -> watching channel 2
-    send(app, Action.MUTE)  # pause
+    send(app, Action.ENTER)  # pause
     assert app.paused
-    # Channel Up/Down seek instead of changing channel while Adult Mode is
-    # on (see the seek tests below) - turning it off (as if from the grid's
-    # toggle row) hands Channel Up/Down back to normal channel-surfing.
-    app.adult_mode = False
+    # Channel Up/Down always changes the channel now (UKE-29 v3) - even
+    # while Adult Mode is on and paused; seeking has its own control (see
+    # the seek tests below).
     send(app, Action.CHANNEL_UP)
     assert not app.paused  # fresh channel: no longer paused
     assert "CH 03" in player.overlays.get(1, "")  # channel bug confirms the real change
 
 
-def test_channel_up_down_seek_instead_of_changing_channel_under_adult_mode(tmp_path):
+def test_seek_forward_backward_skip_playback_under_adult_mode(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     app.adult_mode = True
@@ -669,19 +701,32 @@ def test_channel_up_down_seek_instead_of_changing_channel_under_adult_mode(tmp_p
     send(app, Action.MUTE)  # confirm episode -> watching channel 2
     assert not app.admin_mode  # grid is closed - Adult Mode, not browsing, drives this
     assert player.time_pos == 0.0
-    send(app, Action.CHANNEL_UP)
+    send(app, Action.SEEK_FORWARD)
     assert player.time_pos == app.config.admin_seek_seconds
     assert app.lineup.current.number == 2  # channel itself never changed
-    send(app, Action.CHANNEL_DOWN)
-    send(app, Action.CHANNEL_DOWN)
+    send(app, Action.SEEK_BACKWARD)
+    send(app, Action.SEEK_BACKWARD)
     assert player.time_pos == 0.0  # clamped, doesn't go negative
     assert app.lineup.current.number == 2
 
 
+def test_seek_does_nothing_while_watching_without_adult_mode(tmp_path):
+    # Kid-safe: the dedicated seek control (UKE-29 v3, e.g. a D-pad) is a
+    # no-op unless Adult Mode is on - a kid holding this remote can't scrub.
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.MUTE)  # confirm show
+    send(app, Action.MUTE)  # confirm episode
+    assert not app.adult_mode
+    send(app, Action.SEEK_FORWARD)
+    assert player.time_pos == 0.0
+
+
 def test_channel_up_down_change_channels_normally_without_adult_mode(tmp_path):
-    # Regression guard for the other direction: with Adult Mode off, Channel
-    # Up/Down keep their normal kid-facing meaning even after watching an
-    # episode picked from the grid.
+    # Regression guard: Channel Up/Down keep their normal kid-facing meaning
+    # even after watching an episode picked from the grid, with or without
+    # Adult Mode on (UKE-29 v3 - they're never repurposed into seek anymore).
     app, player, _ = build_app(tmp_path, bridge_seconds=0)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
@@ -698,7 +743,7 @@ def test_seek_shows_an_osd_message_with_the_new_position(tmp_path):
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.MUTE)  # confirm show
     send(app, Action.MUTE)  # confirm episode
-    send(app, Action.CHANNEL_UP)
+    send(app, Action.SEEK_FORWARD)
     message = player.overlays.get(4, "")  # message overlay slot
     assert "»" in message or "10" in message
 
@@ -740,7 +785,7 @@ def test_entering_standby_resets_adult_mode_browsing_and_pause(tmp_path):
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.MUTE)  # confirm show
     send(app, Action.MUTE)  # confirm episode
-    send(app, Action.MUTE)  # pause
+    send(app, Action.ENTER)  # pause
     assert app.adult_mode and app.paused
     send(app, Action.POWER)  # standby
     assert not app.admin_mode

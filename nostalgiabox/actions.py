@@ -23,9 +23,15 @@ class Action(Enum):
     VOLUME_DOWN = auto()
     MUTE = auto()
     DIGIT = auto()          # carries which digit in InputEvent.value (0-9)
-    ENTER = auto()          # confirm a direct channel entry ("OK" / select)
+    ENTER = auto()          # confirm a direct channel entry ("OK" / select);
+                             # also Adult Mode's pause/play while watching
+                             # (see TVApp._handle_enter, UKE-29 v3)
     INFO = auto()           # re-show the channel banner
     LAST_CHANNEL = auto()   # jump back to the previously watched channel
+    SEEK_FORWARD = auto()   # a dedicated seek control (UKE-29 v3), distinct
+    SEEK_BACKWARD = auto()  # from Channel Up/Down - grid horizontal nav while
+                             # browsing, skip forward/back under Adult Mode
+                             # while watching (see TVApp._seek_forward/_backward)
     POWER = auto()          # toggle standby (blank screen)
     ADMIN_TOGGLE = auto()   # secret trigger: toggle the admin/developer view
     QUIT = auto()           # shut the application down entirely

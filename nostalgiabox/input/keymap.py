@@ -54,6 +54,16 @@ _EVDEV_ACTIONS: Dict[str, InputEvent] = {
     "KEY_PREVIOUS": InputEvent(Action.LAST_CHANNEL),
     "KEY_BACK": InputEvent(Action.LAST_CHANNEL),
     "KEY_L": InputEvent(Action.LAST_CHANNEL),
+    # Seek (UKE-29 v3): a dedicated control, distinct from Channel Up/Down -
+    # grid horizontal nav while browsing, skip forward/back under Adult Mode
+    # while watching (see TVApp._seek_forward/_seek_backward). Real remotes
+    # with actual FF/RW buttons get those for free; KEY_F/KEY_R exist so a
+    # D-pad's left/right (which would otherwise collide with Volume - see
+    # KEY_LEFT/KEY_RIGHT above) can be trained to a distinct pair of keys.
+    "KEY_FASTFORWARD": InputEvent(Action.SEEK_FORWARD),
+    "KEY_F": InputEvent(Action.SEEK_FORWARD),
+    "KEY_REWIND": InputEvent(Action.SEEK_BACKWARD),
+    "KEY_R": InputEvent(Action.SEEK_BACKWARD),
     # Power / standby.
     "KEY_POWER": InputEvent(Action.POWER),
     "KEY_SLEEP": InputEvent(Action.POWER),
@@ -92,6 +102,10 @@ _ACTION_BY_NAME: Dict[str, InputEvent] = {
     "info": InputEvent(Action.INFO),
     "last_channel": InputEvent(Action.LAST_CHANNEL),
     "last": InputEvent(Action.LAST_CHANNEL),
+    "seek_forward": InputEvent(Action.SEEK_FORWARD),
+    "seek_backward": InputEvent(Action.SEEK_BACKWARD),
+    "ff": InputEvent(Action.SEEK_FORWARD),
+    "rewind": InputEvent(Action.SEEK_BACKWARD),
     "power": InputEvent(Action.POWER),
     "admin_toggle": InputEvent(Action.ADMIN_TOGGLE),
     "admin": InputEvent(Action.ADMIN_TOGGLE),
@@ -148,6 +162,10 @@ _CHAR_TO_KEY: Dict[str, str] = {
     "I": "KEY_INFO",
     "l": "KEY_LAST",
     "L": "KEY_LAST",
+    "f": "KEY_F",
+    "F": "KEY_F",
+    "r": "KEY_R",
+    "R": "KEY_R",
     "p": "KEY_POWER",
     "P": "KEY_POWER",
     "a": "KEY_A",
@@ -203,6 +221,9 @@ _CEC_ACTIONS: Dict[str, InputEvent] = {
     "display information": InputEvent(Action.INFO),
     "previous channel": InputEvent(Action.LAST_CHANNEL),
     "exit": InputEvent(Action.LAST_CHANNEL),
+    "fast forward": InputEvent(Action.SEEK_FORWARD),
+    "forward": InputEvent(Action.SEEK_FORWARD),
+    "rewind": InputEvent(Action.SEEK_BACKWARD),
     "power": InputEvent(Action.POWER),
     "power toggle function": InputEvent(Action.POWER),
     "power off function": InputEvent(Action.POWER),
