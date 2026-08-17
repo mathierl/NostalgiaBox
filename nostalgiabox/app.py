@@ -115,19 +115,26 @@ def _default_admin_ui_launcher(url: str) -> subprocess.Popen:
     keep running while the browser is up - it's the thing feeding /state
     updates as the cursor moves (see admin_server.py's module docstring).
 
-    --ozone-platform=drm is Chromium's own native DRM/KMS backend: this Pi
-    has no X11/Wayland session at all (mpv talks DRM/KMS directly), so a
-    normal desktop Chromium build has no window server to hand it a window.
-    See scripts/spike_mpv_chromium_handoff.py, which exists specifically to
-    validate this on real hardware before this default is trusted.
+    This Pi has no X11/Wayland session at all (mpv talks DRM/KMS directly),
+    so a normal desktop Chromium build has no window server to hand it a
+    window. scripts/spike_mpv_chromium_handoff.py validated two ways around
+    that on real hardware (UKE-29): Chromium's own --ozone-platform=drm
+    backend isn't compiled into the Raspberry Pi OS Chromium package at all
+    (a hard "Invalid ozone platform: drm" failure, not just a blank screen) -
+    `cage`, a minimal Wayland compositor built for exactly this "one
+    fullscreen kiosk app" case, is the one that actually got a picture on
+    the TV. `cage`/wlroots needs `seatd` running to get permission to claim
+    the DRM session (scripts/install.sh sets both up); without it this will
+    fail with "Could not open target tty: Permission denied".
     """
     import shutil
 
     chromium = shutil.which("chromium-browser") or shutil.which("chromium") or "chromium"
+    cage = shutil.which("cage") or "cage"
     cmd = [
+        cage, "--",
         chromium,
-        "--ozone-platform=drm",
-        "--enable-features=UseOzonePlatform",
+        "--ozone-platform=wayland",
         "--kiosk",
         "--noerrdialogs",
         "--disable-infobars",
@@ -998,8 +1005,9 @@ class TVApp:
         this closes/reopens *that*, not mpv directly. The underlying mpv
         DRM-release timing this depends on was confirmed safe on real
         hardware by scripts/spike_mpv_retroarch_handoff.py (UKE-28); the
-        Chromium side of this same handoff is what
-        scripts/spike_mpv_chromium_handoff.py exists to validate (UKE-29).
+        Chromium side of this same handoff (via `cage`, see
+        _default_admin_ui_launcher) was confirmed the same way by
+        scripts/spike_mpv_chromium_handoff.py (UKE-29).
         """
         core = channel.config.core
         if not core:

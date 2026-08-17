@@ -29,6 +29,23 @@ sudo apt-get install -y \
   python3 python3-pip python3-venv \
   python3-evdev
 
+echo "==> Installing admin-mode UI packages (chromium, cage, seatd)"
+# Admin mode (UKE-29) shows a real browser-based UI via kiosk-mode Chromium,
+# not mpv overlays. This Pi has no X11/Wayland desktop session (mpv talks
+# DRM/KMS directly) - Chromium's own --ozone-platform=drm backend isn't
+# built into the Raspberry Pi OS package (confirmed on real hardware; see
+# scripts/spike_mpv_chromium_handoff.py), so Chromium instead runs inside
+# `cage`, a minimal Wayland compositor made for exactly this "one fullscreen
+# kiosk app" case. `cage`/wlroots needs `seatd` running to get permission to
+# claim the DRM session - without it you'll see "Could not open target tty:
+# Permission denied" and "Failed to start a DRM session" when admin mode is
+# opened.
+sudo apt-get install -y chromium cage seatd
+sudo systemctl enable --now seatd
+sudo usermod -aG seat "${USER}"
+echo "   (added ${USER} to the 'seat' group - if this is a fresh install this"
+echo "    takes effect on next login/reboot, not this shell)"
+
 echo "==> Creating a virtual environment in ${REPO_DIR}/.venv"
 python3 -m venv --system-site-packages "${REPO_DIR}/.venv"
 # shellcheck source=/dev/null
