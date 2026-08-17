@@ -268,7 +268,7 @@ the current one ringed. It's a two-step browser:
    and opens its episode list.
 2. **Episode list.** A plain numbered list of every episode in that show.
    **Channel Up/Down** moves the highlighted episode. **Mute** confirms it and
-   starts playing that exact episode, closing the browser down to a small
+   starts playing that exact episode, clearing the grid down to a small
    corner readout so the show keeps playing. **Power** (a normal press, not a
    hold) backs out to the show grid instead of going to standby.
 
@@ -277,8 +277,8 @@ playing - to close the admin view entirely. If you close it without ever
 confirming an episode, playback resumes exactly where it was when you opened
 admin mode; nothing is interrupted just by looking around.
 
-Once you've confirmed an episode and the browser has closed, **Mute** switches
-roles again and becomes **pause/play** - a control the kid-facing remote never
+Once you've confirmed an episode, **Mute** switches roles again and becomes
+**pause/play** - a control the kid-facing remote never
 exposes, since a small kid pausing the TV mid-show tends to end in tears.
 **Channel Up/Down** also switches roles: instead of changing the channel, it
 skips forward/backward within the current episode by `admin_seek_seconds`
@@ -432,13 +432,14 @@ nostalgiabox/
 ├── playlist.py    the shuffle bag (each episode once, then reshuffle)
 ├── channel.py     folder scanning, tune-in modes, channel navigation
 ├── player.py      mpv player (+ a mock for tests)
-├── overlay.py     the green on-screen display (channel bug, volume, admin panel)
+├── overlay.py     the on-screen display: retro CRT readouts (channel bug,
+│                  volume) and the modern admin-mode grid/episode list/Insights
 ├── crt.py         the CRT shader
 ├── input/         remote input (Flirc/keyboard, HDMI-CEC, keymap)
 ├── static_gen.py  ffmpeg-generated static/glitch/colour-bar clips
-├── thumbnails.py  ffmpeg poster art for the admin-mode UI
-├── admin_server.py  local HTTP server behind the admin-mode UI
-├── admin_ui/      the admin-mode browser UI (HTML/CSS/JS, kiosk Chromium)
+├── thumbnails.py  ffmpeg+Pillow poster grid for the admin-mode UI
+├── watch_state.py per-episode/game watch history, Continue Watching, Insights
+├── recommendations.py  curated similar-show suggestions for Insights
 └── app.py         the TV state machine
 ```
 

@@ -16,7 +16,6 @@ def build_app(
     game_launcher=None,
     player_factory=None,
     watch_state=None,
-    admin_ui_launcher=None,
     drm_handoff_delay=0.0,
     **overrides,
 ):
@@ -46,7 +45,6 @@ def build_app(
         game_launcher=game_launcher,
         player_factory=player_factory,
         watch_state=watch_state,
-        admin_ui_launcher=admin_ui_launcher,
         drm_handoff_delay=drm_handoff_delay,
     )
     return app, player, clock
@@ -314,21 +312,18 @@ def test_resume_mode_restarts_where_left(tmp_path):
 # key-mapping pieces). These tests drive the app the same way that backend
 # would: by delivering the Action.ADMIN_TOGGLE event it emits on release.
 #
-# Admin mode has two nested screens: the show grid (admin_browsing) and,
-# after confirming a show, that show's episode list (admin_episode_browsing).
-# Channel Up/Down move a cursor in whichever screen is open (a 2D row/col
-# cursor in the grid - Volume Up/Down move columns there too - or a simple
-# index in the episode list); Mute confirms; Power backs out of the episode
-# list to the grid instead of standby. Confirming an episode is the only
-# thing that actually changes what's playing - selecting a show just opens
-# its episode list.
+# Admin mode has three nested screens: the show grid (admin_browsing), a
+# show's episode list (admin_episode_browsing) once confirmed, and the
+# Insights view (admin_insights_viewing, see further down). All three are
+# drawn as ASS overlays on top of a pre-composed poster-grid background
+# image (see nostalgiabox.thumbnails) - mpv itself never closes for any of
+# this (see app.py's module docstring for why: a real browser UI briefly
+# did close it, and that reliably segfaulted the box on real hardware).
+# Confirming an episode/continue entry is the only thing that actually
+# changes what's playing - selecting a show just opens its episode list.
 
 
 def test_admin_toggle_opens_show_grid(tmp_path):
-    # The grid/episode-list screens are rendered by the browser-based admin
-    # UI now (UKE-29), not ASS overlays - see admin_server.py. TVApp's job
-    # is just to expose the right state for it to poll (_admin_state_snapshot),
-    # and to hand mpv's display over to a browser process.
     app, player, _ = build_app(tmp_path)
     app.start()
     assert not app.admin_mode
@@ -336,19 +331,12 @@ def test_admin_toggle_opens_show_grid(tmp_path):
     assert app.admin_mode
     assert app.admin_browsing and not app.admin_episode_browsing
     assert app._browse_number == 2  # cursor starts on whatever's playing
-    assert player.closed is True  # mpv's display was handed to the admin UI
-
-    snapshot = app._admin_state_snapshot()
-    assert snapshot["mode"] == "grid"
-    # Insights (UKE-29) is always present too, as its own evergreen row at
-    # the end - excluded here since it isn't a real channel with an
-    # episode-count label.
-    show_sections = [s for s in snapshot["sections"] if s["kind"] != "insights"]
-    names = [t["name"] for s in show_sections for t in s["tiles"]]
-    assert names == ["Dragon Tales", "Arthur", "Rugrats"]
-    assert all(t["count_label"] == "4 eps" for s in show_sections for t in s["tiles"])
-    insights_section = next(s for s in snapshot["sections"] if s["kind"] == "insights")
-    assert insights_section["tiles"][0]["name"] == "Watch Insights"
+    assert player.closed is False  # mpv never closes for browsing (UKE-29)
+    panel = player.overlays.get(5, "")
+    assert "Select a channel" in panel
+    assert "Dragon Tales" in panel and "Arthur" in panel and "Rugrats" in panel
+    assert "4 eps" in panel
+    assert "Watch Insights" in panel  # the evergreen Insights row (UKE-29)
 
 
 def test_admin_toggle_off_by_default_mute_still_mutes(tmp_path):
@@ -361,17 +349,16 @@ def test_admin_toggle_off_by_default_mute_still_mutes(tmp_path):
 
 def test_channel_up_down_no_op_within_a_single_section(tmp_path):
     # 3 channels (2, 3, 4), no games: the "Shows" row is the only row on
-    # screen (see TVApp._section_keys), so Channel Up/Down - which move
-    # between rows, not within one - have nothing to do.
+    # screen (besides the always-present Insights row - see
+    # TVApp._section_keys), so Channel Up (nothing above) has nothing to do,
+    # and Channel Down moves straight to Insights.
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
     assert app._browse_number == 2
-    send(app, Action.CHANNEL_DOWN)
-    assert app._browse_number == 2  # no row below the Shows row
-    assert app.lineup.current.number == 2  # cursor moved (well, didn't), playback didn't
     send(app, Action.CHANNEL_UP)
-    assert app._browse_number == 2  # no row above it either
+    assert app._browse_number == 2  # no row above the Shows row
+    assert app.lineup.current.number == 2  # cursor moved (well, didn't), playback didn't
 
 
 def test_volume_up_down_move_within_a_row(tmp_path):
@@ -402,10 +389,8 @@ def test_mute_on_grid_opens_episode_list_without_tuning(tmp_path):
     assert app._browse_episode_index == 0
     assert app.lineup.current.number == 2  # selecting a show doesn't tune yet
     assert player.muted is False
-    snapshot = app._admin_state_snapshot()
-    assert snapshot["mode"] == "episode_list"
-    assert snapshot["episode_list"]["channel_name"] == "Dragon Tales"
-    assert snapshot["episode_list"]["total"] == 4
+    panel = player.overlays.get(5, "")
+    assert "Dragon Tales" in panel and "Select an episode" in panel
 
 
 def test_channel_up_down_move_episode_cursor(tmp_path):
@@ -441,85 +426,24 @@ def test_mute_confirms_episode_and_plays_it(tmp_path):
     assert "Select an episode" not in player.overlays.get(5, "")
 
 
-def test_confirming_an_episode_gets_a_live_player_back_first(tmp_path):
-    # Regression test for a real crash found on hardware (UKE-29): mpv is
-    # closed the whole time the browser admin UI is up (see _open_admin_ui),
-    # so confirming an episode has to close that browser and get a fresh
-    # mpv back *before* touching self.player - driving an already-terminated
-    # mpv instance is unsafe and was taking the whole process down. With
-    # MockPlayer this wouldn't show up as a crash (it doesn't simulate that),
-    # so this asserts the actual close/reopen sequence happened instead:
-    # a brand new player instance backs app.player, and the channel-bug
-    # overlay lands on *that* one, not the closed original.
-    from tests.helpers import make_admin_ui_launcher
-
-    created = []
-
-    def factory():
-        p = MockPlayer()
-        created.append(p)
-        return p
-
-    launcher, calls, processes = make_admin_ui_launcher()
-    app, player1, _ = build_app(tmp_path, player_factory=factory, admin_ui_launcher=launcher)
+def test_confirming_a_show_and_episode_never_closes_mpv(tmp_path):
+    # Regression guard for the DRM-race crash class (UKE-29): browsing the
+    # grid/episode list and confirming an episode must never close mpv at
+    # all - the poster grid is just another image mpv plays (see
+    # _show_admin_grid_background), not a display handoff to a second
+    # process. (This used to require an explicit close+reopen around this
+    # exact sequence to avoid driving an already-terminated mpv instance,
+    # back when the browser-based admin UI closed mpv on entry - see git
+    # history if you need that version.)
+    app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    assert player1.closed is True
-    # player1 was already playing (from app.start()) and already had a
-    # channel-bug overlay set before admin mode was even entered - capture
-    # that baseline so we can assert it's untouched afterward, rather than
-    # wrongly expecting a closed player to still read as blank.
-    player1_current_before = player1.current
-    player1_overlay_count_before = len(player1.overlays)
-    send(app, Action.MUTE)  # Dragon Tales episode list
-    send(app, Action.MUTE)  # confirm episode 0
-
-    assert processes[0].terminated is True  # the browser admin UI was closed
-    assert len(created) == 1
-    assert app.player is created[0]
-    assert app.player is not player1
-    assert app.player.current is not None  # played on the new instance
-    # the old, closed player was never touched again - no new play() call,
-    # no new overlay call landed on it (the overlay must have been
-    # repointed too, see OverlayManager.rebind_player, or the channel bug
-    # etc. would keep silently going to the dead player forever).
-    assert player1.current == player1_current_before
-    assert len(player1.overlays) == player1_overlay_count_before
-    assert 1 in app.player.overlays  # channel-bug overlay id, on the new player
-
-
-def test_confirming_a_continue_entry_gets_a_live_player_back_first(tmp_path):
-    # Same bug, same fix, the other path that plays something directly from
-    # admin mode without going through the episode list (UKE-29).
-    from tests.helpers import make_admin_ui_launcher
-
-    created = []
-
-    def factory():
-        p = MockPlayer()
-        created.append(p)
-        return p
-
-    launcher, calls, processes = make_admin_ui_launcher()
-    ws = WatchState(tmp_path / "watch_state.json")
-    app, player1, _ = build_app(
-        tmp_path, watch_state=ws, player_factory=factory, admin_ui_launcher=launcher
-    )
-    app.start()
-    episode = _seed_in_progress(app, ws, 3, position=250.0, duration=1200.0)
-    send(app, Action.ADMIN_TOGGLE)
-    assert player1.closed is True
-    player1_current_before = player1.current
-    send(app, Action.CHANNEL_UP)  # onto the continue row
-    assert app._browse_continue_index == 0
-    send(app, Action.MUTE)  # confirm - resumes immediately
-
-    assert processes[0].terminated is True
-    assert len(created) == 1
-    assert app.player is created[0]
-    assert app.player is not player1
-    assert app.player.current == episode
-    assert player1.current == player1_current_before  # the old, closed player untouched
+    assert player.closed is False
+    send(app, Action.MUTE)  # confirm show
+    assert player.closed is False
+    send(app, Action.MUTE)  # confirm episode
+    assert player.closed is False
+    assert player.current is not None
 
 
 def test_power_backs_out_of_episode_list_to_grid(tmp_path):
@@ -532,7 +456,7 @@ def test_power_backs_out_of_episode_list_to_grid(tmp_path):
     assert not app.admin_episode_browsing
     assert app.admin_browsing
     assert not app.standby  # power backed out, it did not toggle standby
-    assert app._admin_state_snapshot()["mode"] == "grid"
+    assert "Select a channel" in player.overlays.get(5, "")
 
 
 # -- Insights view (UKE-29) --------------------------------------------------
@@ -554,20 +478,22 @@ def _walk_to_insights(app):
 def test_confirming_insights_opens_it_with_no_player_interaction(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
-    player_current_before = player.current  # whatever app.start() tuned to
-    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.ADMIN_TOGGLE)  # swaps mpv over to the poster-grid image
+    grid_image = player.current
     _walk_to_insights(app)
     send(app, Action.MUTE)  # confirm
 
     assert not app.admin_browsing
     assert app.admin_insights_viewing
     assert app.admin_mode  # still in admin mode overall
-    # Purely a read-only screen - nothing new was ever asked to play.
-    assert player.current == player_current_before
+    # Purely a read-only screen drawn as an overlay on the same grid image -
+    # nothing new was ever asked to play, and mpv was never closed either.
+    assert player.current == grid_image
+    assert player.closed is False
 
-    snapshot = app._admin_state_snapshot()
-    assert snapshot["mode"] == "insights"
-    assert "totals" in snapshot["insights"]
+    panel = player.overlays.get(5, "")
+    assert "Insights" in panel
+    assert "Nothing watched yet" in panel  # nothing seeded in this test
 
 
 def test_power_backs_out_of_insights_to_grid_on_the_insights_tile(tmp_path):
@@ -583,7 +509,7 @@ def test_power_backs_out_of_insights_to_grid_on_the_insights_tile(tmp_path):
     assert app.admin_browsing
     assert not app.standby  # backed out, did not toggle standby
     assert app._current_section() == "insights"  # landed back on the same tile
-    assert app._admin_state_snapshot()["mode"] == "grid"
+    assert "Select a channel" in player.overlays.get(5, "")
 
 
 def test_admin_toggle_exits_directly_from_insights(tmp_path):
@@ -597,7 +523,7 @@ def test_admin_toggle_exits_directly_from_insights(tmp_path):
     assert not app.admin_insights_viewing
 
 
-def test_insights_snapshot_reflects_watched_totals(tmp_path):
+def test_insights_reflects_watched_totals(tmp_path):
     ws = WatchState(tmp_path / "watch_state.json")
     app, player, _ = build_app(tmp_path, watch_state=ws)
     app.start()
@@ -608,27 +534,30 @@ def test_insights_snapshot_reflects_watched_totals(tmp_path):
     _walk_to_insights(app)
     send(app, Action.MUTE)
 
-    data = app._admin_state_snapshot()["insights"]
-    assert data["totals"]["episodes_watched"] == 1
-    assert data["totals"]["watched_minutes"] == 10
-    assert data["favorite"]["name"] == "Dragon Tales"
-    names = [c["name"] for c in data["channels"]]
-    assert "Dragon Tales" in names
-    assert len(data["activity"]) == 1
-    assert data["activity"][0]["channel_name"] == "Dragon Tales"
+    summary, _suggestions = app._current_insights()
+    assert summary.total_episodes_watched == 1
+    assert summary.total_watched_minutes == 10
+    assert summary.favorite.name == "Dragon Tales"
+
+    panel = player.overlays.get(5, "")
+    assert "10" in panel  # total minutes watched
+    assert "Dragon Tales" in panel  # favorite banner
 
 
-def test_insights_snapshot_with_nothing_watched_is_empty_but_valid(tmp_path):
+def test_insights_with_nothing_watched_is_empty_but_valid(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
     send(app, Action.ADMIN_TOGGLE)
     _walk_to_insights(app)
     send(app, Action.MUTE)
 
-    data = app._admin_state_snapshot()["insights"]
-    assert data["totals"] == {"watched_minutes": 0, "episodes_watched": 0, "games_played": 0}
-    assert data["favorite"] is None
-    assert data["activity"] == []
+    summary, suggestions = app._current_insights()
+    assert summary.total_watched_minutes == 0
+    assert summary.total_episodes_watched == 0
+    assert summary.total_games_played == 0
+    assert summary.favorite is None
+    assert summary.activity == []
+    assert suggestions == []
 
 
 def test_admin_toggle_exits_directly_from_episode_list(tmp_path):
@@ -695,7 +624,7 @@ def test_changing_channel_while_watching_unpauses_and_refreshes_panel(tmp_path):
     send(app, Action.MUTE)  # confirm episode -> watching channel 2
     send(app, Action.MUTE)  # pause
     assert app.paused
-    # Channel Up/Down now seeks while admin_mode is on (see the seek tests
+    # Channel Up/Down seeks while admin_mode is on (see the seek tests
     # below) - a real channel change needs to leave admin mode first.
     send(app, Action.ADMIN_TOGGLE)
     send(app, Action.CHANNEL_UP)
@@ -752,46 +681,6 @@ def test_admin_insights_viewing_blocks_channel_and_volume_actions_from_touching_
     assert app.admin_insights_viewing  # none of those actions closed the screen either
 
 
-def test_drm_handoff_delay_pauses_between_mpv_and_browser_ownership_of_the_display(tmp_path, monkeypatch):
-    # Real-hardware regression (UKE-29): cage's wlroots backend repeatedly
-    # failed to claim the display and the whole process segfaulted, most
-    # likely because mpv.terminate() returning doesn't guarantee the
-    # underlying DRM/GBM teardown is actually done yet. drm_handoff_delay is
-    # the mitigation - a brief pause on each mpv<->browser ownership swap.
-    from tests.helpers import make_admin_ui_launcher
-
-    launcher, calls, _ = make_admin_ui_launcher()
-    sleeps = []
-    monkeypatch.setattr("nostalgiabox.app.time.sleep", lambda s: sleeps.append(s))
-    app, player, _ = build_app(
-        tmp_path,
-        admin_ui_launcher=launcher,
-        player_factory=MockPlayer,
-        drm_handoff_delay=0.5,
-    )
-    app.start()
-
-    send(app, Action.ADMIN_TOGGLE)  # mpv -> browser: one pause, after player.close()
-    assert sleeps == [0.5]
-    assert calls  # the browser actually got launched
-
-    send(app, Action.ADMIN_TOGGLE)  # browser -> mpv: another pause, before rebuilding mpv
-    assert sleeps == [0.5, 0.5]
-
-
-def test_drm_handoff_delay_defaults_to_no_pause(tmp_path, monkeypatch):
-    # The default (used by every other test, and by dry-run) - there's no
-    # real DRM device to race over, and a real sleep would only slow things
-    # down for no benefit.
-    sleeps = []
-    monkeypatch.setattr("nostalgiabox.app.time.sleep", lambda s: sleeps.append(s))
-    app, player, _ = build_app(tmp_path, player_factory=MockPlayer)
-    app.start()
-    send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.ADMIN_TOGGLE)
-    assert sleeps == []
-
-
 def test_admin_toggle_ignored_while_in_standby(tmp_path):
     app, player, _ = build_app(tmp_path)
     app.start()
@@ -812,6 +701,7 @@ def test_entering_standby_resets_admin_mode_browsing_and_pause(tmp_path):
     send(app, Action.POWER)  # standby
     assert not app.admin_mode
     assert not app.admin_browsing and not app.admin_episode_browsing
+    assert not app.admin_insights_viewing
     assert not app.paused
     assert app._pre_admin_path is None
     assert 5 not in player.overlays
@@ -820,12 +710,12 @@ def test_entering_standby_resets_admin_mode_browsing_and_pause(tmp_path):
 # -- games: admin-mode arcade via RetroArch (UKE-28) -------------------------
 # Games are a second kind of admin-grid tile, alongside real channels (see
 # TVApp._admin_tiles): a "system" (SNES) behaves like a channel, and its ROMs
-# behave like episodes, reusing the exact same 2D grid / numbered-list nav.
-# The one thing that's genuinely different is confirming a selection: a video
+# behave like episodes, reusing the exact same grid / numbered-list nav. The
+# one thing that's genuinely different is confirming a selection: a video
 # episode plays and exits back to normal viewing, but a game hands the
-# display to RetroArch (via the injectable game_launcher) and returns to
-# exactly the same game list - see TVApp._launch_game, de-risked on real
-# hardware by scripts/spike_mpv_retroarch_handoff.py before this was built.
+# display to RetroArch (via the injectable game_launcher). This is the one
+# remaining place mpv actually closes (see app.py's module docstring) -
+# de-risked on real hardware by scripts/spike_mpv_retroarch_handoff.py.
 
 
 def _games_override(tmp_path, *, roms=2, ext=".sfc", core="/cores/snes9x.so"):
@@ -843,10 +733,9 @@ def test_game_system_appears_in_admin_grid(tmp_path):
     app, player, _ = build_app(tmp_path, **_games_override(tmp_path, roms=2))
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    snapshot = app._admin_state_snapshot()
-    games_section = next(s for s in snapshot["sections"] if s["kind"] == "games")
-    assert games_section["tiles"][0]["name"] == "SNES"
-    assert games_section["tiles"][0]["count_label"] == "2 games"
+    panel = player.overlays.get(5, "")
+    assert "SNES" in panel
+    assert "2 games" in panel
     assert app.games[0].number == 5  # continues on from the highest real channel (4)
 
 
@@ -861,10 +750,8 @@ def test_can_navigate_onto_and_into_a_game_system(tmp_path):
     send(app, Action.MUTE)  # confirm SNES -> its game list
     assert app.admin_episode_browsing
     assert app._browse_episode_number == 5
-    snapshot = app._admin_state_snapshot()
-    assert snapshot["mode"] == "episode_list"
-    assert snapshot["episode_list"]["channel_name"] == "SNES"
-    assert snapshot["episode_list"]["kind"] == "game"
+    panel = player.overlays.get(5, "")
+    assert "SNES" in panel and "Select a game" in panel
 
 
 def test_confirming_a_game_calls_the_launcher_and_stays_on_the_list(tmp_path):
@@ -918,17 +805,7 @@ def test_confirming_a_second_game_works_after_returning_to_the_list(tmp_path):
     assert calls == list(app.games[0].episodes)  # both, in order
 
 
-def test_game_launch_reopens_the_admin_ui_not_mpv(tmp_path):
-    # mpv is closed once, when admin mode is entered (the display goes to
-    # the browser admin UI - see app.py's _open_admin_ui) - a game launch
-    # from within that session closes/reopens *the browser*, not mpv, since
-    # mpv was never showing the game list to begin with. player_factory
-    # only gets called when admin mode is exited entirely (see the next
-    # test) - this is the real behavioural change from the old ASS-overlay
-    # design, where mpv itself displayed the poster grid and so needed
-    # reopening around every game launch.
-    from tests.helpers import make_admin_ui_launcher
-
+def test_game_launch_stops_and_recreates_player_via_factory(tmp_path):
     created = []
 
     def factory():
@@ -936,110 +813,26 @@ def test_game_launch_reopens_the_admin_ui_not_mpv(tmp_path):
         created.append(p)
         return p
 
-    launcher, calls, processes = make_admin_ui_launcher()
     app, player1, _ = build_app(
         tmp_path,
         game_launcher=lambda core, rom: 0,
         player_factory=factory,
-        admin_ui_launcher=launcher,
         **_games_override(tmp_path),
     )
     app.start()
     send(app, Action.ADMIN_TOGGLE)
-    assert player1.closed is True
-    assert len(calls) == 1  # admin UI launched once, entering admin mode
-
     send(app, Action.CHANNEL_DOWN)
     send(app, Action.VOLUME_UP)
     send(app, Action.MUTE)  # into SNES's game list
     send(app, Action.MUTE)  # confirm and launch
 
-    assert created == []  # mpv was never touched by the game launch
-    assert app.player is player1
-    assert processes[0].terminated is True  # the first admin-UI process was closed...
-    assert len(calls) == 2  # ...and a fresh one launched to show the game list again
-
-
-def test_exiting_admin_mode_after_a_game_recreates_player_via_factory(tmp_path):
-    from tests.helpers import make_admin_ui_launcher
-
-    created = []
-
-    def factory():
-        p = MockPlayer()
-        created.append(p)
-        return p
-
-    launcher, calls, processes = make_admin_ui_launcher()
-    app, player1, _ = build_app(
-        tmp_path,
-        game_launcher=lambda core, rom: 0,
-        player_factory=factory,
-        admin_ui_launcher=launcher,
-        **_games_override(tmp_path),
-    )
-    app.start()
-    send(app, Action.ADMIN_TOGGLE)
-    send(app, Action.CHANNEL_DOWN)
-    send(app, Action.VOLUME_UP)
-    send(app, Action.MUTE)  # into SNES's game list
-    send(app, Action.MUTE)  # confirm and launch a game
-    send(app, Action.ADMIN_TOGGLE)  # exit admin mode entirely
-
-    assert processes[-1].terminated is True  # the admin UI was closed for good
+    assert player1.closed is True
     assert len(created) == 1
     assert app.player is created[0]
     assert app.player is not player1
     # volume/mute state carried over onto the freshly (re)created player
     assert app.player.volume == app.volume
     assert app.player.muted == app.muted
-
-
-def test_admin_ui_launch_failure_falls_back_to_the_normal_picture(tmp_path):
-    # A dead black screen (mpv closed, no browser, nothing) would be a much
-    # worse failure than just not entering admin mode at all.
-    app, player, _ = build_app(tmp_path, admin_ui_launcher=lambda url: None)
-    app.start()
-    send(app, Action.ADMIN_TOGGLE)
-    assert not app.admin_mode
-    assert not app.admin_browsing
-    assert player.current is not None  # normal playback resumed, not left blank
-
-
-def test_admin_ui_launcher_exception_falls_back_to_the_normal_picture(tmp_path):
-    def boom(url):
-        raise RuntimeError("no chromium binary")
-
-    app, player, _ = build_app(tmp_path, admin_ui_launcher=boom)
-    app.start()
-    send(app, Action.ADMIN_TOGGLE)
-    assert not app.admin_mode
-    assert player.current is not None
-
-
-def test_standby_while_admin_ui_open_closes_it_and_gets_a_live_player_back(tmp_path):
-    from tests.helpers import make_admin_ui_launcher
-
-    created = []
-
-    def factory():
-        p = MockPlayer()
-        created.append(p)
-        return p
-
-    launcher, calls, processes = make_admin_ui_launcher()
-    app, player1, _ = build_app(tmp_path, admin_ui_launcher=launcher, player_factory=factory)
-    app.start()
-    send(app, Action.ADMIN_TOGGLE)
-    assert app.admin_mode
-
-    send(app, Action.POWER)  # standby - must not leave the browser hanging open
-
-    assert app.standby
-    assert not app.admin_mode
-    assert processes[0].terminated is True
-    assert len(created) == 1  # a live player was reopened before .stop()/overlay calls
-    assert app.player is created[0]
 
 
 def test_game_launch_without_a_player_factory_reuses_the_same_player(tmp_path):
@@ -1086,6 +879,50 @@ def test_show_episodes_still_exit_admin_browsing_normally(tmp_path):
     assert not app.admin_browsing
     assert app.admin_mode
     assert player.current is not None
+
+
+def test_drm_handoff_delay_pauses_around_a_game_launch(tmp_path, monkeypatch):
+    # Real-hardware regression (UKE-29): the DRM master race that segfaulted
+    # the box when a second process (the now-reverted browser admin UI) had
+    # to fight mpv for the display. The one remaining display handoff -
+    # launching a game via RetroArch - gets the same defensive pause as
+    # cheap insurance, even though it was separately validated safe without
+    # it (scripts/spike_mpv_retroarch_handoff.py).
+    sleeps = []
+    monkeypatch.setattr("nostalgiabox.app.time.sleep", lambda s: sleeps.append(s))
+    app, player, _ = build_app(
+        tmp_path,
+        game_launcher=lambda core, rom: 0,
+        player_factory=MockPlayer,
+        drm_handoff_delay=0.5,
+        **_games_override(tmp_path),
+    )
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.CHANNEL_DOWN)
+    send(app, Action.VOLUME_UP)
+    send(app, Action.MUTE)  # into SNES's game list
+    send(app, Action.MUTE)  # confirm and launch
+    # once before handing off to RetroArch, once before rebuilding mpv
+    assert sleeps == [0.5, 0.5]
+
+
+def test_drm_handoff_delay_defaults_to_no_pause_around_game_launch(tmp_path, monkeypatch):
+    # The default (used by every other test, and by dry-run) - there's no
+    # real DRM device to race over, and a real sleep would only slow things
+    # down for no benefit.
+    sleeps = []
+    monkeypatch.setattr("nostalgiabox.app.time.sleep", lambda s: sleeps.append(s))
+    app, player, _ = build_app(
+        tmp_path, game_launcher=lambda core, rom: 0, player_factory=MockPlayer, **_games_override(tmp_path)
+    )
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    send(app, Action.CHANNEL_DOWN)
+    send(app, Action.VOLUME_UP)
+    send(app, Action.MUTE)
+    send(app, Action.MUTE)
+    assert sleeps == []
 
 
 # -- watch state: continue-watching / watched / play tracking (UKE-29) ------
@@ -1232,9 +1069,8 @@ def test_watch_state_survives_across_app_restarts(tmp_path, monkeypatch):
 # so they can be resumed directly rather than dug back out of a channel's
 # episode list. Cursor lives at self._browse_continue_index while focused
 # there (None the rest of the time, which is most of the time - see
-# TVApp._move_browse_cursor). These tests use the default 3-channel,
-# 2-column build_app() layout: row 0 = [Dragon Tales(2), Arthur(3)],
-# row 1 = [Rugrats(4)].
+# TVApp._move_browse_cursor). These tests use the default 3-channel
+# build_app() layout.
 
 
 def _seed_in_progress(app, ws, channel_number, *, index=0, position=200.0, duration=1200.0):
@@ -1309,6 +1145,22 @@ def test_confirming_continue_entry_resumes_at_saved_position(tmp_path):
     assert player.played[-1] == (episode, 250.0)
 
 
+def test_confirming_a_continue_entry_never_closes_mpv(tmp_path):
+    # Same guard as test_confirming_a_show_and_episode_never_closes_mpv,
+    # for the other path that plays something directly from admin mode
+    # without going through the episode list (UKE-29).
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(tmp_path, watch_state=ws)
+    app.start()
+    episode = _seed_in_progress(app, ws, 3, position=250.0, duration=1200.0)
+    send(app, Action.ADMIN_TOGGLE)
+    assert player.closed is False
+    send(app, Action.CHANNEL_UP)  # onto the continue row
+    send(app, Action.MUTE)  # confirm
+    assert player.closed is False
+    assert player.current == episode
+
+
 def test_continue_entries_recomputed_on_reopening_admin_mode(tmp_path):
     ws = WatchState(tmp_path / "watch_state.json")
     app, player, _ = build_app(tmp_path, watch_state=ws)
@@ -1324,9 +1176,9 @@ def test_continue_entries_recomputed_on_reopening_admin_mode(tmp_path):
 
 # -- Netflix-style swimlane redesign (UKE-29) --------------------------------
 # The admin browse screen is a stack of independent single-row "sections" -
-# Continue Watching, Shows, Games (each only present if non-empty) - rather
-# than one flat multi-row grid. Channel Up/Down move between rows and stop
-# at the top/bottom; Volume Up/Down move within a row, wrapping at its ends;
+# Continue Watching, Shows, Games (each only present if non-empty), then the
+# always-present Insights row. Channel Up/Down move between rows and stop at
+# the top/bottom; Volume Up/Down move within a row, wrapping at its ends;
 # moving onto a new row always lands on its first tile.
 
 
@@ -1336,8 +1188,6 @@ def test_channel_down_walks_through_every_present_section(tmp_path):
     app.start()
     _seed_in_progress(app, ws, 3)
     send(app, Action.ADMIN_TOGGLE)
-    # Insights (UKE-29) is always present too, as its own evergreen row at
-    # the very end.
     assert app._section_keys() == ["continue", "shows", "games", "insights"]
     assert app._current_section() == "shows"  # opening always lands on the grid, not the row
 

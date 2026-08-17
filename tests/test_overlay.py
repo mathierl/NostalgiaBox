@@ -187,12 +187,378 @@ def test_clear_all_also_clears_admin_panel(tmp_path):
     assert 5 not in player.overlays
 
 
-# Note: the full-screen admin browse grid and episode list (formerly
-# show_admin_browser/show_admin_episode_list, drawn as ASS overlays over a
-# pre-baked poster image) were removed under UKE-29's Chromium pivot - admin
-# mode now hands the display to a real browser UI (see admin_server.py,
-# admin_ui/index.html, and TVApp._open_admin_ui/_admin_state_snapshot in
-# app.py, plus tests/test_admin_server.py and tests/test_app.py for coverage
-# of that new rendering path). Only the small persistent corner panel
-# (show_admin_panel, tested above) is still ASS-rendered, since it overlays
-# the live picture during actual playback.
+def test_admin_browser_highlights_selected_channel(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "b", 3)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [
+                {"number": 3, "name": "Arthur", "path": str(tmp_path / "a")},
+                {"number": 4, "name": "Bugs", "path": str(tmp_path / "b")},
+            ],
+        }
+    )
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_browser(lineup, highlight_number=4)
+    ass = player.overlays[5]
+    assert "Select a channel" in ass
+    assert "CH 04  Bugs" in ass
+    assert "CH 03  Arthur" in ass
+    assert "3 eps" in ass  # Bugs' episode count label
+    assert "0 eps" in ass  # Arthur has no folder in this test, so 0 episodes
+    assert "mute select" in ass
+    # only the highlighted tile gets a selection ring drawn (\3c is the
+    # outline-color tag used only by _outline_rect, not by plain text labels)
+    assert ass.count("\\3c") == 1
+
+
+def test_admin_browser_draws_continue_watching_row(tmp_path):
+    from nostalgiabox.channel import build_lineup
+    from nostalgiabox.watch_state import ContinueEntry
+
+    make_show(tmp_path, "b", 3)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 4, "name": "Bugs", "path": str(tmp_path / "b")}],
+        }
+    )
+    lineup = build_lineup(config)
+    entry = ContinueEntry(
+        channel_number=4,
+        channel_name="Bugs",
+        episode_path=tmp_path / "b" / "b_ep01.mp4",
+        title="Bugs Ep 1",
+        resume_position=200.0,
+        minutes_left=12,
+        last_played=1000.0,
+    )
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_browser(lineup, highlight_number=4, continue_entries=[entry], continue_index=0)
+    ass = player.overlays[5]
+    assert "Continue Watching" in ass
+    assert "Bugs - Bugs Ep 1" in ass
+    assert "12 min left" in ass
+    # the continue-row entry is selected, so the grid tile itself must not
+    # also show as highlighted - only one outline ring total.
+    assert ass.count("\\3c") == 1
+
+
+def test_admin_browser_without_continue_entries_omits_the_row(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "b", 3)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 4, "name": "Bugs", "path": str(tmp_path / "b")}],
+        }
+    )
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_browser(lineup, highlight_number=4)
+    ass = player.overlays[5]
+    assert "Continue Watching" not in ass
+    # grid tile highlighting is unaffected by the (absent) continue row.
+    assert ass.count("\\3c") == 1
+
+
+def test_admin_browser_and_panel_share_overlay_slot(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    config = _config(tmp_path)
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_browser(lineup, highlight_number=3)
+    assert "Select a channel" in player.overlays[5]
+    om.show_admin_panel(lineup, paused=False)
+    assert "Select a channel" not in player.overlays[5]  # replaced, not stacked
+    om.clear_admin_panel()
+    assert 5 not in player.overlays
+
+
+def test_admin_browser_draws_evergreen_insights_row(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "a", 2)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 3, "name": "Arthur", "path": str(tmp_path / "a")}],
+        }
+    )
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+
+    # Not selected: no extra outline beyond the grid tile's own.
+    om.show_admin_browser(lineup, highlight_number=3, insights_selected=False)
+    ass = player.overlays[5]
+    assert "Watch Insights" in ass
+    assert ass.count("\\3c") == 1
+
+    # Selected: the grid tile is no longer highlighted, only the Insights row.
+    om.show_admin_browser(lineup, highlight_number=3, insights_selected=True)
+    ass = player.overlays[5]
+    assert "Watch Insights" in ass
+    assert ass.count("\\3c") == 1
+
+
+def test_admin_episode_list_highlights_selected_episode(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "b", 3)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 4, "name": "Bugs", "path": str(tmp_path / "b")}],
+        }
+    )
+    lineup = build_lineup(config)
+    channel = next(c for c in lineup if c.number == 4)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_episode_list(channel, highlight_index=1)
+    ass = player.overlays[5]
+    assert "Bugs" in ass
+    assert "Select an episode" in ass
+    assert "1.  " in ass and "2.  " in ass and "3.  " in ass
+    assert "power back" in ass
+
+
+def test_admin_episode_list_scrolls_to_keep_selection_visible(tmp_path):
+    from nostalgiabox.channel import build_lineup
+    from nostalgiabox.overlay import _EPISODE_VISIBLE_ROWS
+
+    make_show(tmp_path, "b", 41)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 4, "name": "Bluey", "path": str(tmp_path / "b")}],
+        }
+    )
+    lineup = build_lineup(config)
+    channel = next(c for c in lineup if c.number == 4)
+    assert len(channel.episodes) == 41
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+
+    # Near the top: no "more above" hint, but there are more below.
+    om.show_admin_episode_list(channel, highlight_index=0)
+    ass = player.overlays[5]
+    assert "1.  " in ass
+    assert "▲" not in ass  # nothing above yet
+    assert "▼" in ass  # more below
+    assert "(1 of 41)" in ass
+
+    # Deep in the middle: the selected row's own label must actually be
+    # drawn (this is the bug that was reported - the cursor kept moving
+    # but the screen never scrolled to follow it).
+    om.show_admin_episode_list(channel, highlight_index=30)
+    ass = player.overlays[5]
+    assert "31.  " in ass
+    assert "▲" in ass  # scrolled past the top now
+    assert "(31 of 41)" in ass
+
+    # Near the bottom: no "more below" hint since row 41 is the last one.
+    om.show_admin_episode_list(channel, highlight_index=40)
+    ass = player.overlays[5]
+    assert "41.  " in ass
+    assert "▲" in ass
+    assert "▼" not in ass
+    assert "(41 of 41)" in ass
+
+    # Sanity: the window never shows more rows than fit on screen.
+    row_lines = [ln for ln in ass.split("\n") if ln.split("}")[-1][:1].isdigit()]
+    assert len(row_lines) <= _EPISODE_VISIBLE_ROWS
+
+
+def _config_with_games(tmp_path, *, snes_roms=3, arthur_eps=2):
+    make_show(tmp_path, "a", arthur_eps)
+    make_show(tmp_path, "snes", snes_roms, ext=".sfc")
+    return config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 3, "name": "Arthur", "path": str(tmp_path / "a")}],
+            "games": {
+                "systems": [
+                    {"name": "SNES", "path": str(tmp_path / "snes"), "core": "core.so", "extensions": [".sfc"]}
+                ]
+            },
+        }
+    )
+
+
+def test_admin_browser_shows_game_systems_alongside_channels(tmp_path):
+    from nostalgiabox.channel import build_game_channels, build_lineup
+
+    config = _config_with_games(tmp_path, snes_roms=3, arthur_eps=2)
+    lineup = build_lineup(config)
+    games = build_game_channels(config)
+    tiles = list(lineup) + games
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_browser(tiles, highlight_number=games[0].number)
+    ass = player.overlays[5]
+    assert "SNES" in ass
+    assert "3 games" in ass    # game systems count in "games", not "eps"
+    assert "2 eps" in ass      # real channels are unaffected
+    assert "Shows" in ass and "Games" in ass  # section swimlane labels
+
+
+def test_admin_browser_omits_games_section_label_when_there_are_no_games(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "a", 2)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 3, "name": "Arthur", "path": str(tmp_path / "a")}],
+        }
+    )
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_browser(lineup, highlight_number=3)
+    ass = player.overlays[5]
+    assert "Shows" in ass
+    assert "Games" not in ass
+
+
+def test_admin_episode_list_says_select_a_game_for_game_channels(tmp_path):
+    from nostalgiabox.channel import build_game_channels
+
+    config = _config_with_games(tmp_path, snes_roms=2)
+    system = build_game_channels(config)[0]
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_episode_list(system, highlight_index=0)
+    ass = player.overlays[5]
+    assert "Select a game" in ass
+    assert "Select an episode" not in ass
+    assert "SNES" in ass
+
+
+def test_admin_episode_list_says_select_an_episode_for_show_channels(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    config = _config_with_games(tmp_path)
+    channel = next(c for c in build_lineup(config) if c.number == 3)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_episode_list(channel, highlight_index=0)
+    assert "Select an episode" in player.overlays[5]
+
+
+def test_admin_episode_list_and_browser_share_overlay_slot(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    make_show(tmp_path, "b", 2)
+    config = config_from_dict(
+        {
+            "shuffle_seed": 1,
+            "channels": [{"number": 4, "name": "Bugs", "path": str(tmp_path / "b")}],
+        }
+    )
+    lineup = build_lineup(config)
+    channel = next(c for c in lineup if c.number == 4)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_browser(lineup, highlight_number=4)
+    assert "Select a channel" in player.overlays[5]
+    om.show_admin_episode_list(channel, highlight_index=0)
+    assert "Select a channel" not in player.overlays[5]  # replaced, not stacked
+    assert "Select an episode" in player.overlays[5]
+    om.clear_admin_panel()
+    assert 5 not in player.overlays
+
+
+# -- Insights screen (UKE-29) ------------------------------------------------
+# No prior ASS version of this existed - it was originally built only for
+# the (now-reverted) browser UI. See nostalgiabox.watch_state.insights_summary
+# for how the data is rolled up.
+
+
+def _empty_summary():
+    from nostalgiabox.watch_state import InsightsSummary
+
+    return InsightsSummary(
+        channels=[], favorite=None, activity=[],
+        total_watched_minutes=0, total_episodes_watched=0, total_games_played=0,
+    )
+
+
+def test_insights_empty_state(tmp_path):
+    player = MockPlayer()
+    om = OverlayManager(player, _config(tmp_path), clock=FakeClock())
+    om.show_admin_insights(_empty_summary())
+    ass = player.overlays[5]
+    assert "Nothing watched yet" in ass
+    assert "power back" in ass
+
+
+def test_insights_shows_totals_and_favorite(tmp_path):
+    from nostalgiabox.watch_state import ChannelInsight, InsightsSummary
+
+    fav = ChannelInsight(
+        number=3, name="Arthur", kind="show", watched_count=2, total_count=4,
+        watched_minutes=42, play_count=0, last_played=1000.0,
+    )
+    summary = InsightsSummary(
+        channels=[fav], favorite=fav, activity=[],
+        total_watched_minutes=42, total_episodes_watched=2, total_games_played=0,
+    )
+    player = MockPlayer()
+    om = OverlayManager(player, _config(tmp_path), clock=FakeClock())
+    om.show_admin_insights(summary, suggestions=["Bluey", "Bugs"])
+    ass = player.overlays[5]
+    assert "42" in ass  # total minutes watched
+    assert "Favorite" in ass and "Arthur" in ass
+    assert "Similar:" in ass and "Bluey" in ass and "Bugs" in ass
+    assert "2 of 4" in ass  # Arthur's completion progress
+
+
+def test_insights_shows_recent_activity(tmp_path):
+    from nostalgiabox.watch_state import ActivityEntry, ChannelInsight, InsightsSummary
+
+    fav = ChannelInsight(
+        number=3, name="Arthur", kind="show", watched_count=1, total_count=4,
+        watched_minutes=10, play_count=0, last_played=1000.0,
+    )
+    activity = [
+        ActivityEntry(
+            channel_number=3, channel_name="Arthur", kind="show",
+            title="Sick as a Dog", when=1000.0, watched=True,
+        )
+    ]
+    summary = InsightsSummary(
+        channels=[fav], favorite=fav, activity=activity,
+        total_watched_minutes=10, total_episodes_watched=1, total_games_played=0,
+    )
+    player = MockPlayer()
+    om = OverlayManager(player, _config(tmp_path), clock=FakeClock())
+    om.show_admin_insights(summary)
+    ass = player.overlays[5]
+    assert "Recent Activity" in ass
+    assert "Sick as a Dog" in ass
+
+
+def test_insights_and_browser_share_overlay_slot(tmp_path):
+    from nostalgiabox.channel import build_lineup
+
+    config = _config(tmp_path)
+    lineup = build_lineup(config)
+    player = MockPlayer()
+    om = OverlayManager(player, config, clock=FakeClock())
+    om.show_admin_browser(lineup, highlight_number=3)
+    assert "Select a channel" in player.overlays[5]
+    om.show_admin_insights(_empty_summary())
+    assert "Select a channel" not in player.overlays[5]  # replaced, not stacked
+    assert "Nothing watched yet" in player.overlays[5]

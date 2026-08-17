@@ -74,17 +74,19 @@ def _cmd_check(config: Config) -> int:
 
 
 def _generate_admin_thumbnails(config: Config, tiles) -> None:
-    """(Re)generate the admin-mode poster art, best-effort.
+    """(Re)generate the admin-mode poster grid image, best-effort.
 
     Runs as part of --check (and so scripts/install.sh) rather than at
-    runtime, so opening the admin view on the Pi is always instant. Missing
-    ffmpeg, or a failed extraction, only produces a warning - it never
-    blocks config validation. ``tiles`` is real channels and game systems
-    combined; game systems never get a poster (no frame to grab from a ROM),
-    the browser admin UI shows a placeholder tile for those.
+    runtime, so opening the admin view on the Pi is always instant: mpv just
+    plays the pre-composed image (see thumbnails.py) the same way it plays
+    the static/colour-bars filler clips. Missing ffmpeg/Pillow, or a failed
+    extraction, only produces a warning - it never blocks config validation.
+    ``tiles`` is real channels and game systems combined; game systems never
+    get a poster (no frame to grab from a ROM) - they get a plain
+    placeholder tile in the composed grid instead.
     """
     from .static_gen import DEFAULT_ASSETS_DIR
-    from .thumbnails import THUMBS_SUBDIR, ffmpeg_available, generate_admin_assets
+    from .thumbnails import THUMBS_SUBDIR, ffmpeg_available, generate_admin_assets, pillow_available
 
     if not ffmpeg_available():
         print(
@@ -92,13 +94,18 @@ def _generate_admin_thumbnails(config: Config, tiles) -> None:
             "run `sudo apt install ffmpeg`)"
         )
         return
+    if not pillow_available():
+        print(
+            "admin-mode posters: skipped (needs Pillow - "
+            "run `pip install Pillow` or reinstall with `scripts/install.sh`)"
+        )
+        return
     cache_dir = (config.assets_dir or DEFAULT_ASSETS_DIR) / THUMBS_SUBDIR
-    posters = generate_admin_assets(tiles, cache_dir)
-    show_count = sum(1 for c in tiles if c.config.kind != "game" and not c.is_empty)
-    if posters or show_count == 0:
-        print(f"admin-mode posters: ready ({len(posters)}/{show_count} at {cache_dir})")
+    grid_path = generate_admin_assets(tiles, cache_dir)
+    if grid_path is not None:
+        print(f"admin-mode show grid: ready ({grid_path})")
     else:
-        print("admin-mode posters: could not be generated (see warnings above)")
+        print("admin-mode show grid: could not be generated (see warnings above)")
 
 
 def _list_audio_devices() -> int:

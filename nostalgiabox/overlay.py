@@ -13,24 +13,27 @@ Everything is rendered as ASS overlays on a fixed 1280x720 virtual canvas (mpv
 scales it to the TV) and cleared automatically after a few seconds by
 :meth:`OverlayManager.tick`, which the main loop calls every iteration.
 
-The full-screen admin browse grid and episode list used to live here too
-(drawn as ASS text/vector shapes over a pre-baked poster image - see git
-history before UKE-29's Chromium pivot if you need it) - they're rendered by
-a real browser-based UI now (see admin_server.py and TVApp._open_admin_ui),
-since ASS overlays can't do rounded cards, real-size poster art, or anything
-resembling the approved Netflix-style design. Only the small persistent
-corner panel (:meth:`show_admin_panel`) shown during live playback is still
-ASS-rendered, since that's overlaid on top of the actual kid-facing picture.
+The admin/developer view (poster grid, episode list, Insights) is drawn here
+too, in a separate modern (Netflix-ish) style, deliberately distinct from the
+retro CRT look above - the kid-facing overlays never use any of this. UKE-29
+briefly moved this to a real browser (Chromium/cage) for richer visuals, then
+reverted: handing the display to a second process that has to fight mpv for
+DRM ownership on every open/close reliably segfaulted the whole box on real
+hardware. Back to ASS + a single pre-composed poster-grid background image
+(see :mod:`nostalgiabox.thumbnails`) - one process, one owner of the display,
+no race condition.
 """
 
 from __future__ import annotations
 
 import time
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional, Sequence
 
-from .channel import ChannelLineup
+from .channel import Channel, ChannelLineup, episode_title, item_label
 from .config import Config, UiConfig
 from .player import Player
+from .thumbnails import GRID_HEADER_H, admin_section_layout
+from .watch_state import ContinueEntry, InsightsSummary
 
 # Virtual canvas the overlays are laid out on. This maps to the WHOLE display
 # (a 16:9 TV), so mpv scales it to whatever the screen is.
@@ -82,14 +85,14 @@ class OverlayManager:
     def rebind_player(self, player: Player) -> None:
         """Point future overlay calls at a newly (re)created Player instance.
 
-        TVApp._reopen_player() swaps in a fresh mpv instance after admin
-        mode or a game hands the display back (the old one was already
-        terminated - see Player.close()). Without calling this too, every
-        overlay method below would keep silently talking to that dead
-        instance for the rest of the process's life: MpvPlayer's overlay
-        calls all swallow exceptions internally (see player.py), so nothing
-        crashes - the channel bug, volume bar, and admin corner panel just
-        silently stop appearing after the first admin-mode/game cycle.
+        TVApp._reopen_player() swaps in a fresh mpv instance after a game
+        hands the display back (the old one was already terminated - see
+        Player.close()). Without calling this too, every overlay method
+        below would keep silently talking to that dead instance for the
+        rest of the process's life: MpvPlayer's overlay calls all swallow
+        exceptions internally (see player.py), so nothing crashes - the
+        channel bug, volume bar, and admin overlays just silently stop
+        appearing after the first game-launch cycle.
         """
         self._player = player
 
@@ -121,14 +124,75 @@ class OverlayManager:
         """Persistent grown-ups-only overlay: every channel, its episode
         count, and the current pause state. Reached by holding Power; see
         :class:`nostalgiabox.app.TVApp`. Shown during live playback only -
-        the full-screen browse grid/episode list are the browser-based
-        admin UI now (see admin_server.py), not this overlay.
+        the full-screen browse grid/episode list/Insights each replace this
+        overlay with their own while they're open.
         """
         ass = _admin_panel_ass(lineup, paused, self._ui)
         self._player.set_overlay(_ID_ADMIN, ass, CANVAS_W, CANVAS_H)
         self._expiry.pop(_ID_ADMIN, None)  # persistent until cleared
 
+    def show_admin_browser(
+        self,
+        tiles: Sequence["Channel"],
+        *,
+        highlight_number: Optional[int],
+        continue_entries: Sequence["ContinueEntry"] = (),
+        continue_index: Optional[int] = None,
+        insights_selected: bool = False,
+    ) -> None:
+        """Highlight ring, title/subtitle labels and header/footer text drawn
+        on top of the real poster-grid background image (see
+        :mod:`nostalgiabox.thumbnails` and :class:`nostalgiabox.app.TVApp`,
+        which swaps the player onto that image before calling this).
+        ``tiles`` is real channels and game systems combined (see
+        :meth:`nostalgiabox.app.TVApp._admin_tiles`), in display order.
+
+        ``continue_entries`` (see :mod:`nostalgiabox.watch_state`) is drawn
+        as a text-only row above the header, e.g. "Arthur - Sick as a Dog
+        (12 min left)" - no poster art, since unlike the channel/game grid
+        it can't be pre-baked into the background image (it changes with
+        live watch state, not just at ``--check`` time). ``continue_index``
+        highlights one of them; when it's not ``None`` the channel/game grid
+        below isn't highlighted at all (the cursor is on the row, not the
+        grid) - see :meth:`nostalgiabox.app.TVApp._move_browse_cursor`.
+        ``insights_selected`` highlights the evergreen Insights tile at the
+        bottom instead (UKE-29) - mutually exclusive with both of the above.
+        """
+        ass = _admin_browser_ass(
+            tiles, highlight_number, continue_entries, continue_index, insights_selected
+        )
+        self._player.set_overlay(_ID_ADMIN, ass, CANVAS_W, CANVAS_H)
+        self._expiry.pop(_ID_ADMIN, None)  # persistent until cleared
+
+    def show_admin_episode_list(
+        self, channel: "Channel", *, highlight_index: Optional[int]
+    ) -> None:
+        """Full-screen numbered episode list for one channel (no poster art -
+        just an opaque backdrop plus text), reached by confirming a channel
+        in :meth:`show_admin_browser`.
+        """
+        ass = _admin_episode_list_ass(channel, highlight_index)
+        self._player.set_overlay(_ID_ADMIN, ass, CANVAS_W, CANVAS_H)
+        self._expiry.pop(_ID_ADMIN, None)
+
+    def show_admin_insights(
+        self, summary: "InsightsSummary", *, suggestions: Sequence[str] = ()
+    ) -> None:
+        """Full-screen, read-only watch-stats view (UKE-29): totals, a
+        "favorite" channel/game system, per-channel completion progress, a
+        recent-activity feed, and text-only similar-show suggestions for the
+        favorite (see :mod:`nostalgiabox.recommendations`) - reached by
+        confirming the evergreen Insights tile at the bottom of the show
+        grid (see :meth:`show_admin_browser`).
+        """
+        ass = _admin_insights_ass(summary, suggestions)
+        self._player.set_overlay(_ID_ADMIN, ass, CANVAS_W, CANVAS_H)
+        self._expiry.pop(_ID_ADMIN, None)
+
     def clear_admin_panel(self) -> None:
+        # Clears whichever admin view is currently up - the browse grid,
+        # episode list, Insights, and the corner panel all share one overlay
+        # slot since only one is ever shown at a time.
         self._player.clear_overlay(_ID_ADMIN)
         self._expiry.pop(_ID_ADMIN, None)
 
@@ -243,13 +307,17 @@ def _standby_ass(ui: UiConfig) -> str:
 
 
 # --------------------------------------------------------------------------
-# Admin mode: the small corner panel shown during live playback (modern
-# styling, deliberately separate from the retro CRT look above - kid-facing
-# overlays never use any of this).
+# Admin mode: modern (Netflix-ish) styling, deliberately separate from the
+# retro CRT look above - kid-facing overlays never use any of this. No glow/
+# blur (flat, not phosphor-bloom), a bundled sans-serif instead of the retro
+# terminal font, and a dark neutral palette instead of CRT green.
 # --------------------------------------------------------------------------
 _ADMIN_FONT = "Roboto"  # bundled sans-serif; see assets/fonts/Roboto-LICENSE.txt (Apache-2.0)
 _ADMIN_WHITE = "&H00FFFFFF"
 _ADMIN_DIM = "&H00B3B3B3"
+_ADMIN_MUTED = "&H00737373"
+_ADMIN_ACCENT = "&H0047D1FF"  # a warm amber (BGR) - favorite/highlight accents
+_ADMIN_BG = "&H00141414"
 
 
 def _admin_style(*, size: int, color: str = _ADMIN_WHITE, bold: bool = True) -> str:
@@ -279,12 +347,381 @@ def _admin_panel_ass(lineup: "ChannelLineup", paused: bool, ui: UiConfig) -> str
     return "\n".join(parts)
 
 
+# "Continue Watching" text row (UKE-29): drawn in canvas-space safe-area
+# coordinates (like the header/footer, not the tile grid's local image
+# space) since - unlike the poster grid - it's never baked into the
+# background image; see thumbnails.GRID_HEADER_H for why the header
+# reserves room for it regardless of whether any entries exist on a given
+# run. Text-only, no poster art (the chosen "minimalist" visual treatment -
+# also sidesteps needing live per-episode poster generation for state that
+# changes on every watch, not just at ``--check`` time).
+_CONTINUE_LIMIT = 3
+_CONTINUE_LABEL_Y = _IY0 + 44
+_CONTINUE_ROW_Y = _IY0 + 68
+_CONTINUE_CHIP_H = 58
+_CONTINUE_GAP = 24
+_CONTINUE_CHIP_W = ((_IX1 - _IX0) - _CONTINUE_GAP * (_CONTINUE_LIMIT - 1)) // _CONTINUE_LIMIT
+
+# The evergreen Insights tile (UKE-29): drawn as an extra "section" at the
+# bottom of the grid, in canvas-space safe-area coordinates like the
+# Continue Watching row above (it's not part of the pre-baked poster-grid
+# background image either - always present regardless of config/watch
+# state, so there's nothing to bake ahead of time).
+_INSIGHTS_TILE_H = 64
+_INSIGHTS_GAP_ABOVE = 20
+
+
+def _truncate(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 1].rstrip() + "…"
+
+
+def _admin_browser_ass(
+    tiles: "Sequence[Channel]",
+    highlight_number: Optional[int],
+    continue_entries: "Sequence[ContinueEntry]" = (),
+    continue_index: Optional[int] = None,
+    insights_selected: bool = False,
+) -> str:
+    """Header, per-section "Shows"/"Games" swimlane labels, per-tile title/
+    count labels (positioned to sit right under each poster - see
+    :func:`nostalgiabox.thumbnails.admin_section_layout` - a highlight ring
+    around the selected one, an evergreen "Insights" row at the bottom, and
+    a footer hint. The posters themselves are the background image this
+    draws on top of, not drawn here. ``tiles`` is real channels and game
+    systems combined.
+
+    ``continue_entries`` draws the "Continue Watching" row above the header
+    (see the constants just above); when ``continue_index`` is set, that's
+    where the cursor is. ``insights_selected`` highlights the Insights row
+    instead. All three highlight states are mutually exclusive.
+    """
+    channels = list(tiles)
+    header = "Select a channel"
+    footer = "←↑↓→ move      mute select      hold power exit"
+    parts: List[str] = []
+
+    if continue_entries:
+        parts.append(
+            rf"{{\an7\pos({_IX0},{_CONTINUE_LABEL_Y}){_admin_style(size=18, color=_ADMIN_MUTED, bold=False)}}}"
+            "Continue Watching"
+        )
+        for i, entry in enumerate(continue_entries[:_CONTINUE_LIMIT]):
+            x = _IX0 + i * (_CONTINUE_CHIP_W + _CONTINUE_GAP)
+            selected = i == continue_index
+            if selected:
+                parts.append(
+                    _outline_rect(
+                        x=x - 8,
+                        y=_CONTINUE_ROW_Y - 8,
+                        w=_CONTINUE_CHIP_W + 16,
+                        h=_CONTINUE_CHIP_H + 16,
+                        color=_ADMIN_WHITE,
+                        thickness=3,
+                    )
+                )
+            title_color = _ADMIN_WHITE if selected else _ADMIN_DIM
+            title = _truncate(f"{entry.channel_name} - {entry.title}", 30)
+            subtitle = f"{entry.minutes_left} min left"
+            parts.append(rf"{{\an7\pos({x},{_CONTINUE_ROW_Y}){_admin_style(size=20, color=title_color)}}}{_escape(title)}")
+            parts.append(
+                rf"{{\an7\pos({x},{_CONTINUE_ROW_Y + 28}){_admin_style(size=16, color=_ADMIN_MUTED, bold=False)}}}{_escape(subtitle)}"
+            )
+
+    parts.append(rf"{{\an7\pos({_IX0},{_IY0}){_admin_style(size=34)}}}{_escape(header)}")
+    last_y = GRID_HEADER_H
+    for section in admin_section_layout(channels):
+        if not section.tiles:
+            continue
+        label_x = _FRAME_X0 + section.tiles[0].x
+        parts.append(
+            rf"{{\an7\pos({label_x},{section.label_y}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}"
+            f"{_escape(section.title)}"
+        )
+        for tile in section.tiles:
+            channel = tile.channel
+            x, y = _FRAME_X0 + tile.x, tile.y
+            selected = (
+                continue_index is None and not insights_selected and channel.number == highlight_number
+            )
+            if selected:
+                parts.append(
+                    _outline_rect(x=x - 4, y=y - 4, w=tile.w + 8, h=tile.h + 8, color=_ADMIN_WHITE, thickness=3)
+                )
+            count = len(channel.episodes)
+            subtitle = f"{count} {item_label(channel, count)}"
+            title = f"CH {channel.number:02d}  {channel.name}"
+            title_color = _ADMIN_WHITE if selected else _ADMIN_DIM
+            parts.append(
+                rf"{{\an7\pos({x},{y + tile.h + 8}){_admin_style(size=22, color=title_color)}}}{_escape(title)}"
+            )
+            parts.append(
+                rf"{{\an7\pos({x},{y + tile.h + 34}){_admin_style(size=18, color=_ADMIN_MUTED, bold=False)}}}"
+                f"{_escape(subtitle)}"
+            )
+            last_y = max(last_y, y + tile.h + _GRID_LABEL_H_LOCAL)
+
+    # Evergreen "Insights" row - always present, always last, one wide tile.
+    insights_y = last_y + _INSIGHTS_GAP_ABOVE
+    if insights_selected:
+        parts.append(
+            _outline_rect(
+                x=_IX0 - 4, y=insights_y - 4, w=(_IX1 - _IX0) + 8, h=_INSIGHTS_TILE_H + 8,
+                color=_ADMIN_WHITE, thickness=3,
+            )
+        )
+    insights_bg = _ADMIN_ACCENT if insights_selected else "&H00303030"
+    parts.append(
+        _filled_rect(x=_IX0, y=insights_y, w=_IX1 - _IX0, h=_INSIGHTS_TILE_H, fill=insights_bg)
+    )
+    insights_color = _ADMIN_WHITE
+    parts.append(
+        rf"{{\an4\pos({_IX0 + 24},{insights_y + _INSIGHTS_TILE_H // 2}){_admin_style(size=26, color=insights_color)}}}"
+        "\U0001F4CA  Watch Insights"
+    )
+    parts.append(
+        rf"{{\an6\pos({_IX1 - 24},{insights_y + _INSIGHTS_TILE_H // 2}){_admin_style(size=18, color=_ADMIN_MUTED, bold=False)}}}"
+        "stats & suggestions"
+    )
+
+    parts.append(rf"{{\an2\pos({_FRAME_CX},{_IY1}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}{_escape(footer)}")
+    return "\n".join(parts)
+
+
+# Local mirror of thumbnails._GRID_LABEL_H (not exported - the module keeps
+# it private, and duplicating one int here is simpler than reaching into a
+# leading-underscore name from another module).
+_GRID_LABEL_H_LOCAL = 58
+
+
+_EPISODE_ROW_H = 40
+_EPISODE_LIST_TOP = _IY0 + 96
+_EPISODE_LIST_BOTTOM = _IY1 - 44  # leave room for the footer hint below
+_EPISODE_VISIBLE_ROWS = max(1, (_EPISODE_LIST_BOTTOM - _EPISODE_LIST_TOP) // _EPISODE_ROW_H)
+
+
+def _episode_scroll_offset(total: int, highlight_index: Optional[int]) -> int:
+    """First visible row index for the episode list: keeps the highlighted
+    episode roughly centered in the visible window, clamped so the window
+    never scrolls past the start/end of the list. With few enough episodes
+    to fit on screen this is always 0 (no scrolling needed).
+    """
+    if total <= _EPISODE_VISIBLE_ROWS:
+        return 0
+    index = highlight_index or 0
+    offset = index - _EPISODE_VISIBLE_ROWS // 2
+    max_offset = total - _EPISODE_VISIBLE_ROWS
+    return max(0, min(offset, max_offset))
+
+
+def _admin_episode_list_ass(channel: "Channel", highlight_index: Optional[int]) -> str:
+    """Full-screen numbered episode list for one channel: an opaque dark
+    backdrop (there's no poster image behind this screen, unlike the show
+    grid) plus a header, the numbered rows, and a footer hint.
+
+    Only :data:`_EPISODE_VISIBLE_ROWS` rows fit on screen at once, so long
+    lists scroll to keep the highlighted episode in view (see
+    :func:`_episode_scroll_offset`), with small "more above/below" hints
+    when the list is scrolled.
+    """
+    backdrop = _filled_rect(x=_FRAME_X0, y=0, w=_FRAME_W, h=CANVAS_H, fill=_ADMIN_BG)
+    header = _escape(channel.name)
+    total = len(channel.episodes)
+    verb = "Select a game" if channel.config.kind == "game" else "Select an episode"
+    subheader = verb if total <= 1 else f"{verb}  ({(highlight_index or 0) + 1} of {total})"
+    footer = "↑↓ move      mute select      power back"
+
+    parts = [backdrop]
+    parts.append(rf"{{\an7\pos({_IX0},{_IY0}){_admin_style(size=34)}}}{header}")
+    parts.append(rf"{{\an7\pos({_IX0},{_IY0 + 44}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}{_escape(subheader)}")
+
+    offset = _episode_scroll_offset(total, highlight_index)
+    visible = channel.episodes[offset : offset + _EPISODE_VISIBLE_ROWS]
+    for row, path in enumerate(visible):
+        i = offset + row
+        selected = i == highlight_index
+        y = _EPISODE_LIST_TOP + row * _EPISODE_ROW_H
+        color = _ADMIN_WHITE if selected else _ADMIN_DIM
+        label = f"{i + 1}.  {episode_title(path)}"
+        parts.append(rf"{{\an7\pos({_IX0},{y}){_admin_style(size=24, color=color, bold=selected)}}}{_escape(label)}")
+
+    if offset > 0:
+        hint = f"▲ {offset} more"
+        parts.append(rf"{{\an7\pos({_IX0},{_EPISODE_LIST_TOP - 30}){_admin_style(size=16, color=_ADMIN_MUTED, bold=False)}}}{_escape(hint)}")
+    remaining = total - (offset + len(visible))
+    if remaining > 0:
+        hint = f"▼ {remaining} more"
+        y = _EPISODE_LIST_TOP + len(visible) * _EPISODE_ROW_H + 4
+        parts.append(rf"{{\an7\pos({_IX0},{y}){_admin_style(size=16, color=_ADMIN_MUTED, bold=False)}}}{_escape(hint)}")
+
+    parts.append(rf"{{\an2\pos({_FRAME_CX},{_IY1}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}{_escape(footer)}")
+    return "\n".join(parts)
+
+
+# --------------------------------------------------------------------------
+# Insights screen (UKE-29): totals, a "favorite", per-channel progress,
+# recent activity, and text-only similar-show suggestions. No prior ASS
+# version of this existed - it was designed and built directly for the
+# (now-reverted) browser UI, so this is a fresh layout, not a restoration.
+# --------------------------------------------------------------------------
+_STAT_Y = _IY0 + 40
+_STAT_NUMBER_SIZE = 52
+_STAT_LABEL_SIZE = 16
+_FAVORITE_Y = _IY0 + 140
+_PROGRESS_LABEL_Y = _IY0 + 210
+_PROGRESS_TOP = _IY0 + 240
+_PROGRESS_ROW_H = 30
+_PROGRESS_MAX_ROWS = 6
+_PROGRESS_BAR_W = 180
+_PROGRESS_BAR_H = 10
+_ACTIVITY_GAP = 28
+_ACTIVITY_ROW_H = 26
+_ACTIVITY_MAX_ROWS = 5
+
+
+def _stat_block(x: int, number: str, label: str) -> List[str]:
+    return [
+        rf"{{\an7\pos({x},{_STAT_Y}){_admin_style(size=_STAT_NUMBER_SIZE, color=_ADMIN_WHITE)}}}{_escape(number)}",
+        rf"{{\an7\pos({x},{_STAT_Y + _STAT_NUMBER_SIZE + 6}){_admin_style(size=_STAT_LABEL_SIZE, color=_ADMIN_MUTED, bold=False)}}}{_escape(label)}",
+    ]
+
+
+def _admin_insights_ass(summary: "InsightsSummary", suggestions: Sequence[str] = ()) -> str:
+    """Full-screen read-only stats view: an opaque backdrop (same treatment
+    as the episode list - there's no poster art behind this screen) plus a
+    header, three headline stats, a favorite banner with similar-show
+    suggestions, per-channel completion bars, and a recent-activity feed.
+    """
+    parts = [_filled_rect(x=_FRAME_X0, y=0, w=_FRAME_W, h=CANVAS_H, fill=_ADMIN_BG)]
+    parts.append(rf"{{\an7\pos({_IX0},{_IY0}){_admin_style(size=34)}}}Insights")
+
+    touched = [c for c in summary.channels if c.last_played > 0]
+    if not touched:
+        parts.append(
+            rf"{{\an5\pos({_FRAME_CX},{CANVAS_H // 2}){_admin_style(size=24, color=_ADMIN_MUTED, bold=False)}}}"
+            "Nothing watched yet - pick a show to get started!"
+        )
+        parts.append(
+            rf"{{\an2\pos({_FRAME_CX},{_IY1}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}"
+            "power back"
+        )
+        return "\n".join(parts)
+
+    # Three headline stats, evenly spaced across the safe width.
+    stat_w = (_IX1 - _IX0) // 3
+    parts += _stat_block(_IX0, str(summary.total_watched_minutes), "minutes watched")
+    parts += _stat_block(_IX0 + stat_w, str(summary.total_episodes_watched), "episodes watched")
+    parts += _stat_block(_IX0 + stat_w * 2, str(summary.total_games_played), "games played")
+
+    # Favorite banner + similar-show suggestions.
+    if summary.favorite is not None:
+        fav = summary.favorite
+        noun = "game system" if fav.kind == "game" else "show"
+        parts.append(
+            rf"{{\an7\pos({_IX0},{_FAVORITE_Y}){_admin_style(size=24, color=_ADMIN_ACCENT)}}}"
+            f"★ Favorite {noun}: {_escape(fav.name)}"
+        )
+        if suggestions:
+            text = "Similar: " + ", ".join(suggestions)
+            parts.append(
+                rf"{{\an7\pos({_IX0},{_FAVORITE_Y + 30}){_admin_style(size=16, color=_ADMIN_MUTED, bold=False)}}}"
+                f"{_escape(_truncate(text, 90))}"
+            )
+
+    # Per-channel completion progress - touched channels only, favorites-
+    # first (same ordering rule as the "favorite" pick itself), capped so
+    # this never needs to scroll.
+    parts.append(
+        rf"{{\an7\pos({_IX0},{_PROGRESS_LABEL_Y}){_admin_style(size=18, color=_ADMIN_MUTED, bold=False)}}}"
+        "Progress"
+    )
+    ranked = sorted(
+        touched,
+        key=lambda c: c.play_count if c.kind == "game" else (c.watched_minutes or 0),
+        reverse=True,
+    )
+    green = _hex_to_ass("#4DFF5A")
+    for row, ch in enumerate(ranked[:_PROGRESS_MAX_ROWS]):
+        y = _PROGRESS_TOP + row * _PROGRESS_ROW_H
+        label = _truncate(ch.name, 22)
+        parts.append(rf"{{\an7\pos({_IX0},{y}){_admin_style(size=18, color=_ADMIN_WHITE)}}}{_escape(label)}")
+        bar_x = _IX0 + 260
+        fraction = 0.0 if ch.total_count <= 0 else min(1.0, ch.watched_count / ch.total_count)
+        parts.append(_filled_rect(x=bar_x, y=y + 4, w=_PROGRESS_BAR_W, h=_PROGRESS_BAR_H, fill="&H00303030"))
+        if fraction > 0:
+            parts.append(
+                _filled_rect(x=bar_x, y=y + 4, w=_PROGRESS_BAR_W * fraction, h=_PROGRESS_BAR_H, fill=green)
+            )
+        count_label = f"{ch.watched_count} of {ch.total_count}"
+        parts.append(
+            rf"{{\an7\pos({bar_x + _PROGRESS_BAR_W + 16},{y}){_admin_style(size=16, color=_ADMIN_MUTED, bold=False)}}}"
+            f"{_escape(count_label)}"
+        )
+
+    # Recent activity feed, most recent first.
+    activity_label_y = _PROGRESS_TOP + min(len(ranked), _PROGRESS_MAX_ROWS) * _PROGRESS_ROW_H + _ACTIVITY_GAP
+    parts.append(
+        rf"{{\an7\pos({_IX0},{activity_label_y}){_admin_style(size=18, color=_ADMIN_MUTED, bold=False)}}}"
+        "Recent Activity"
+    )
+    now = time.time()
+    for row, entry in enumerate(summary.activity[:_ACTIVITY_MAX_ROWS]):
+        y = activity_label_y + 28 + row * _ACTIVITY_ROW_H
+        if y > _IY1 - _ACTIVITY_ROW_H:
+            break  # ran out of room - a longer feed just gets cut off, not overflowed
+        status = "" if entry.watched else " (in progress)"
+        text = f"{entry.channel_name} - {_truncate(entry.title, 34)}{status}"
+        parts.append(rf"{{\an7\pos({_IX0},{y}){_admin_style(size=18, color=_ADMIN_DIM, bold=False)}}}{_escape(text)}")
+        when = _relative_time(entry.when, now)
+        if when:
+            parts.append(
+                rf"{{\an9\pos({_IX1},{y}){_admin_style(size=16, color=_ADMIN_MUTED, bold=False)}}}{_escape(when)}"
+            )
+
+    parts.append(
+        rf"{{\an2\pos({_FRAME_CX},{_IY1}){_admin_style(size=20, color=_ADMIN_MUTED, bold=False)}}}power back"
+    )
+    return "\n".join(parts)
+
+
+def _relative_time(when: float, now: float) -> str:
+    """A short, human "how long ago" label (e.g. "5m ago", "3h ago", "2d
+    ago") for the Insights activity feed.
+    """
+    if when <= 0:
+        return ""
+    delta = max(0.0, now - when)
+    if delta < 60:
+        return "just now"
+    minutes = int(delta // 60)
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = int(delta // 3600)
+    if hours < 24:
+        return f"{hours}h ago"
+    days = int(delta // 86400)
+    return f"{days}d ago"
+
+
 def _filled_rect(*, x: float, y: float, w: float, h: float, fill: str) -> str:
     """An ASS drawing (\\p1) filled rectangle at absolute canvas coordinates."""
     x, y = round(x), round(y)
     w, h = round(w), round(h)
     draw = f"m 0 0 l {w} 0 l {w} {h} l 0 {h}"
     return rf"{{\an7\pos({x},{y})\p1\c{fill}\1a&H00&\bord0\shad0}}{draw}{{\p0}}"
+
+
+def _outline_rect(*, x: float, y: float, w: float, h: float, color: str, thickness: int) -> str:
+    """An ASS drawing: an unfilled rectangle outline - the admin grid's
+    selection ring around the highlighted poster tile."""
+    x, y = round(x), round(y)
+    w, h = round(w), round(h)
+    draw = f"m 0 0 l {w} 0 l {w} {h} l 0 {h}"
+    return (
+        rf"{{\an7\pos({x},{y})\p1\1a&HFF&\3c{color}\bord{thickness}\shad0}}"
+        rf"{draw}{{\p0}}"
+    )
 
 
 def _dot(*, cx: float, cy: float, r: float, fill: str) -> str:

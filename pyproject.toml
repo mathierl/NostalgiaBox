@@ -14,9 +14,12 @@ keywords = ["raspberry-pi", "media-player", "retro-tv", "mpv", "nostalgia", "kid
 
 # Core runtime dependency. The hardware-specific dependencies (python-mpv,
 # evdev) live in the optional "pi" extra so the pure logic can be developed and
-# tested on any machine.
+# tested on any machine. Pillow composes the admin-mode poster grid into a
+# single background image (see thumbnails.py) - core, not the "pi" extra,
+# since --check (which generates it) is meant to run on a dev machine too.
 dependencies = [
     "PyYAML>=6.0",
+    "Pillow>=9.0",
 ]
 
 [project.optional-dependencies]
