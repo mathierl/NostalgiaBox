@@ -316,6 +316,19 @@ another one. This needs RetroArch and the relevant libretro core(s) already
 installed on the Pi; NostalgiaBox just launches `retroarch -L <core> <rom>`
 and waits.
 
+#### Insights
+
+A third row, always present at the bottom of the show grid regardless of
+what's configured. **Mute** opens a read-only screen: total minutes
+watched, episodes watched, and game sessions played; a "favorite" channel
+(whichever one has the most engagement - watched minutes for shows, play
+count for games); a completion bar per channel/game system; a recent-
+activity feed (most recent first); and, if the favorite happens to be a
+well-known title, a couple of similar-show suggestions as a research
+pointer for restocking the SD card - purely text, nothing gets downloaded
+or added automatically. **Power** backs out to the grid, same as the
+episode list.
+
 ---
 
 ## Updating later

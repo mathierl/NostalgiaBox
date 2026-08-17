@@ -45,6 +45,13 @@
   .card.game {
     background-image: repeating-linear-gradient(135deg, #2c2c2c, #2c2c2c 12px, #232323 12px, #232323 24px);
   }
+  .card.insights {
+    background: linear-gradient(135deg, #2a2410, #1c1c1e);
+  }
+  .card.insights::before {
+    content: "\2605"; /* star */
+    position: absolute; top: 14px; left: 14px; font-size: 22px; color: #e6b325;
+  }
   .card.focused { transform: scale(1.12); z-index: 5; box-shadow: 0 0 0 3px #ffffff, 0 12px 28px rgba(0,0,0,0.6); }
   .card-scrim { width: 100%; padding: 9px 12px 8px; background: linear-gradient(0deg, rgba(0,0,0,0.88), transparent 90%); }
   .card-title { font-size: 15px; font-weight: 600; line-height: 1.25; }
@@ -87,6 +94,26 @@
   .list-item.focused .sub.amber { color: #a37714; }
 
   .empty { color: #6a6a6a; font-size: 15px; padding: 40px 64px; }
+
+  /* Insights screen (UKE-29) - same full-screen-overlay treatment as
+     #detail (including the z-index fix, for the same reason). */
+  #insights { position: absolute; inset: 0; z-index: 10; background: #141414; padding: 40px 64px; display: none; overflow-y: auto; }
+  #insights.open { display: block; }
+  .stat-row { display: flex; gap: 16px; margin: 20px 0 28px; }
+  .stat-card { background: #1c1c1e; border-radius: 8px; padding: 16px 22px; min-width: 150px; }
+  .stat-value { font-size: 30px; font-weight: 700; }
+  .stat-label { font-size: 12px; color: #8a8a8a; margin-top: 4px; }
+  .favorite-banner { background: linear-gradient(135deg, #2a2410, #1c1c1e); border-radius: 8px; padding: 16px 20px; margin-bottom: 28px; }
+  .favorite-title { font-size: 16px; font-weight: 700; color: #e6b325; }
+  .favorite-sub { font-size: 13px; color: #c9c9c9; margin-top: 6px; }
+  .insights-section-title { font-size: 15px; font-weight: 700; margin: 24px 0 10px; color: #f2f2f2; }
+  .progress-row { display: flex; align-items: center; gap: 14px; padding: 8px 0; }
+  .progress-name { flex: 0 0 200px; font-size: 14px; color: #e0e0e0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .progress-track { flex: 1; height: 8px; background: #2a2a2a; border-radius: 4px; overflow: hidden; }
+  .progress-fill { height: 100%; background: #2fa84f; }
+  .progress-label { flex: 0 0 90px; text-align: right; font-size: 12px; color: #8a8a8a; }
+  .activity-item { display: flex; align-items: center; gap: 14px; padding: 8px 16px; font-size: 14px; color: #c9c9c9; }
+  .activity-when { margin-left: auto; font-size: 12px; color: #6f6f6f; flex-shrink: 0; }
 </style>
 </head>
 <body>
@@ -105,12 +132,20 @@
     <div class="list" id="detailList"></div>
     <div class="footer">&uarr; &darr; move &nbsp;&nbsp;&nbsp; mute select &nbsp;&nbsp;&nbsp; power back</div>
   </div>
+
+  <div id="insights">
+    <div class="back-hint">&lsaquo; power to go back</div>
+    <div class="detail-header">Watch Insights</div>
+    <div class="detail-sub">What's been watched and played on this box</div>
+    <div id="insightsBody"></div>
+  </div>
 </div>
 
 <script>
 var POLL_MS = 120;
 var grid = document.getElementById("grid");
 var detail = document.getElementById("detail");
+var insights = document.getElementById("insights");
 
 function el(tag, className, text) {
   var e = document.createElement("div");
@@ -121,6 +156,7 @@ function el(tag, className, text) {
 
 function renderGrid(state) {
   detail.classList.remove("open");
+  insights.classList.remove("open");
   grid.innerHTML = "";
 
   var continueItems = state.continue || [];
@@ -149,13 +185,18 @@ function renderGrid(state) {
 
     var cards = el("div", "cards");
     section.tiles.forEach(function(tile) {
-      var card = el("div", "card" + (tile.kind === "game" ? " game" : "") + (tile.selected ? " focused" : ""));
+      var extraClass = tile.kind === "game" ? " game" : tile.kind === "insights" ? " insights" : "";
+      var card = el("div", "card" + extraClass + (tile.selected ? " focused" : ""));
       if (tile.poster_url) {
         card.style.backgroundImage = "url(" + tile.poster_url + ")";
       }
       if (tile.all_watched) card.appendChild(el("div", "card-check", "✓"));
       var scrim = el("div", "card-scrim");
-      scrim.appendChild(el("div", "card-title", "CH " + String(tile.number).padStart(2, "0") + "  " + tile.name));
+      // The Insights tile isn't a real channel - no "CH NN" number to show.
+      var titleText = tile.kind === "insights"
+        ? tile.name
+        : "CH " + String(tile.number).padStart(2, "0") + "  " + tile.name;
+      scrim.appendChild(el("div", "card-title", titleText));
       var subText = tile.count_label;
       if (tile.watched_count !== null && tile.watched_count !== undefined && tile.count > 0) {
         subText = tile.watched_count + " of " + tile.count + (tile.kind === "game" ? " played" : " watched");
@@ -175,6 +216,7 @@ function renderGrid(state) {
 
 function renderEpisodeList(data) {
   detail.classList.add("open");
+  insights.classList.remove("open");
   // Belt-and-braces alongside #detail's z-index fix above: also drop the
   // grid's own content while it's not showing, so there's nothing left
   // underneath to ever bleed through regardless of future CSS changes.
@@ -208,9 +250,77 @@ function renderEpisodeList(data) {
   if (focused) focused.scrollIntoView({ block: "nearest" });
 }
 
+function statCard(value, label) {
+  var card = el("div", "stat-card");
+  card.appendChild(el("div", "stat-value", String(value)));
+  card.appendChild(el("div", "stat-label", label));
+  return card;
+}
+
+function renderInsights(data) {
+  detail.classList.remove("open");
+  insights.classList.add("open");
+  // Same belt-and-braces reasoning as renderEpisodeList: nothing left
+  // underneath that could ever bleed through.
+  grid.innerHTML = "";
+
+  var body = document.getElementById("insightsBody");
+  body.innerHTML = "";
+
+  var totals = data.totals || {};
+  var statRow = el("div", "stat-row");
+  statRow.appendChild(statCard(totals.watched_minutes || 0, "minutes watched"));
+  statRow.appendChild(statCard(totals.episodes_watched || 0, "episodes watched"));
+  statRow.appendChild(statCard(totals.games_played || 0, "game sessions"));
+  body.appendChild(statRow);
+
+  if (data.favorite) {
+    var fav = el("div", "favorite-banner");
+    fav.appendChild(el("div", "favorite-title", "★ Favorite: " + data.favorite.name));
+    if ((data.suggestions || []).length) {
+      fav.appendChild(el("div", "favorite-sub", "Since they love " + data.favorite.name + ", they might also like: " + data.suggestions.join(", ")));
+    }
+    body.appendChild(fav);
+  }
+
+  if ((data.channels || []).length) {
+    body.appendChild(el("div", "insights-section-title", "Progress"));
+    data.channels.forEach(function(c) {
+      var row = el("div", "progress-row");
+      row.appendChild(el("div", "progress-name", c.name));
+      var track = el("div", "progress-track");
+      var pct = c.total_count > 0 ? Math.round((c.watched_count / c.total_count) * 100) : 0;
+      var fill = el("div", "progress-fill");
+      fill.style.width = pct + "%";
+      track.appendChild(fill);
+      row.appendChild(track);
+      var label = c.kind === "game"
+        ? c.play_count + (c.play_count === 1 ? " play" : " plays")
+        : c.watched_count + " of " + c.total_count;
+      row.appendChild(el("div", "progress-label", label));
+      body.appendChild(row);
+    });
+  }
+
+  body.appendChild(el("div", "insights-section-title", "Recent Activity"));
+  if ((data.activity || []).length) {
+    data.activity.forEach(function(a) {
+      var row = el("div", "activity-item");
+      var text = a.channel_name + " - " + a.title + (a.watched ? "" : " (in progress)");
+      row.appendChild(el("div", null, text));
+      row.appendChild(el("div", "activity-when", a.when_label));
+      body.appendChild(row);
+    });
+  } else {
+    body.appendChild(el("div", "empty", "Nothing watched or played yet."));
+  }
+}
+
 function render(state) {
   if (state.mode === "episode_list") {
     renderEpisodeList(state.episode_list || {});
+  } else if (state.mode === "insights") {
+    renderInsights(state.insights || {});
   } else {
     renderGrid(state);
   }

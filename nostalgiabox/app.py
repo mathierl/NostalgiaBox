@@ -43,7 +43,14 @@ from .static_gen import (
     GLITCH_FILENAME,
     STATIC_FILENAME,
 )
-from .watch_state import STATE_FILENAME, STATE_SUBDIR, ContinueEntry, WatchState, continue_watching
+from .watch_state import (
+    STATE_FILENAME,
+    STATE_SUBDIR,
+    ContinueEntry,
+    WatchState,
+    continue_watching,
+    insights_summary,
+)
 
 log = logging.getLogger(__name__)
 
@@ -145,6 +152,28 @@ def _default_admin_ui_launcher(url: str) -> subprocess.Popen:
     return subprocess.Popen(cmd)
 
 
+def _relative_time(when: float, now: float) -> str:
+    """A short, human "how long ago" label for the Insights activity feed
+    (e.g. "5m ago", "3h ago", "2d ago") - computed server-side (rather than
+    left to the browser) so it's correct regardless of the browser's own
+    clock/timezone, and simple since the state is polled fresh each time
+    rather than needing to tick on its own between polls.
+    """
+    if when <= 0:
+        return ""
+    delta = max(0.0, now - when)
+    if delta < 60:
+        return "just now"
+    minutes = int(delta // 60)
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = int(delta // 3600)
+    if hours < 24:
+        return f"{hours}h ago"
+    days = int(delta // 86400)
+    return f"{days}d ago"
+
+
 class TVApp:
     """The retro-TV application state machine."""
 
@@ -216,6 +245,16 @@ class TVApp:
         # entirely, from either screen.
         self.admin_browsing = False
         self.admin_episode_browsing = False
+        # A third admin-mode screen (UKE-29): the Insights view (watch-time
+        # stats, a "favorite" channel, a recent-activity feed, and
+        # text-only similar-show suggestions - see watch_state.insights_summary
+        # and recommendations.py). Modeled the same way as the Continue
+        # Watching row rather than as a real Channel - it's a single evergreen
+        # entry in _section_keys, not something scanned from disk - so
+        # _browse_on_insights is the marker for "cursor is on it", the same
+        # role _browse_continue_index plays for that row.
+        self.admin_insights_viewing = False
+        self._browse_on_insights = False
         self._browse_number: Optional[int] = None
         self._browse_episode_number: Optional[int] = None
         self._browse_episode_index: int = 0
@@ -390,6 +429,9 @@ class TVApp:
         if action == Action.POWER:
             if self.admin_episode_browsing:
                 self._admin_back_to_shows()
+                return
+            if self.admin_insights_viewing:
+                self._admin_back_from_insights()
                 return
             self._toggle_standby()
             return
@@ -590,6 +632,8 @@ class TVApp:
         if self.admin_browsing:
             if self._browse_continue_index is not None:
                 self._confirm_continue_selection()
+            elif self._browse_on_insights:
+                self._confirm_insights_selection()
             else:
                 self._confirm_show_selection()
             return
@@ -609,10 +653,12 @@ class TVApp:
             # we are so browsing without picking anything new can resume it.
             self.admin_browsing = True
             self.admin_episode_browsing = False
+            self.admin_insights_viewing = False
             self._browse_number = self.lineup.current.number
             self._browse_episode_number = None
             self._browse_episode_index = 0
             self._browse_continue_index = None
+            self._browse_on_insights = False
             self._refresh_continue_entries()
             self._pre_admin_path = self._playing_path
             self._pre_admin_pos = self.player.get_time_pos() or 0.0
@@ -620,7 +666,9 @@ class TVApp:
         else:
             self.admin_browsing = False
             self.admin_episode_browsing = False
+            self.admin_insights_viewing = False
             self._browse_continue_index = None
+            self._browse_on_insights = False
             if self.paused:
                 self._toggle_pause()
             self.overlay.clear_admin_panel()
@@ -708,7 +756,7 @@ class TVApp:
     def _refresh_admin_panel(self) -> None:
         if not self.admin_mode:
             return
-        if self.admin_episode_browsing or self.admin_browsing:
+        if self.admin_episode_browsing or self.admin_browsing or self.admin_insights_viewing:
             # Nothing to push - the browser polls GET /state itself (see
             # admin_server.py), which always reflects the current cursor
             # position live. Kept as a no-op call site (rather than removed)
@@ -735,6 +783,8 @@ class TVApp:
     def _admin_state_snapshot(self) -> dict:
         if self.admin_episode_browsing:
             return {"mode": "episode_list", "episode_list": self._episode_list_snapshot()}
+        if self.admin_insights_viewing:
+            return {"mode": "insights", "insights": self._insights_snapshot()}
         return {"mode": "grid", **self._grid_snapshot()}
 
     def _grid_snapshot(self) -> dict:
@@ -757,6 +807,29 @@ class TVApp:
             if not tiles:
                 continue
             sections.append({"title": title, "kind": key, "tiles": [self._tile_snapshot(c, continue_index) for c in tiles]})
+
+        # Insights (UKE-29): a single evergreen tile, not a real Channel -
+        # built by hand rather than via _tile_snapshot, which assumes a real
+        # channel with episodes/posters/watched-counts behind it.
+        sections.append(
+            {
+                "title": "Insights",
+                "kind": "insights",
+                "tiles": [
+                    {
+                        "number": None,
+                        "name": "Watch Insights",
+                        "kind": "insights",
+                        "count": None,
+                        "count_label": "stats & suggestions",
+                        "poster_url": None,
+                        "selected": continue_index is None and self._browse_on_insights,
+                        "watched_count": None,
+                        "all_watched": False,
+                    }
+                ],
+            }
+        )
 
         return {"continue": continue_items, "sections": sections}
 
@@ -835,6 +908,64 @@ class TVApp:
             "episodes": episodes,
         }
 
+    def _insights_snapshot(self) -> dict:
+        """The Insights screen's data (UKE-29): per-channel watch stats, a
+        "favorite", a recent-activity feed, and text-only similar-show
+        suggestions for that favorite (see recommendations.py). Recomputed
+        fresh every time this screen is open - see watch_state.insights_summary
+        for why that's cheap enough not to bother caching.
+        """
+        from .recommendations import suggest_similar
+
+        summary = insights_summary(self._admin_tiles(), self.watch_state)
+        # watch_state timestamps are wall-clock (time.time(), see
+        # EpisodeState/GameState.last_played) - self._clock() is a separate,
+        # usually-monotonic clock used only for internal scheduling
+        # deadlines elsewhere in this class, and would give a nonsense delta
+        # here.
+        now = time.time()
+
+        channels = [
+            {
+                "number": c.number,
+                "name": c.name,
+                "kind": c.kind,
+                "watched_count": c.watched_count,
+                "total_count": c.total_count,
+                "watched_minutes": c.watched_minutes,
+                "play_count": c.play_count,
+                "is_favorite": summary.favorite is not None and c.number == summary.favorite.number,
+            }
+            for c in summary.channels
+        ]
+        activity = [
+            {
+                "channel_name": a.channel_name,
+                "kind": a.kind,
+                "title": a.title,
+                "when_label": _relative_time(a.when, now),
+                "watched": a.watched,
+            }
+            for a in summary.activity
+        ]
+        favorite = None
+        suggestions: List[str] = []
+        if summary.favorite is not None:
+            favorite = {"name": summary.favorite.name, "kind": summary.favorite.kind}
+            suggestions = suggest_similar(summary.favorite.name)
+
+        return {
+            "totals": {
+                "watched_minutes": summary.total_watched_minutes,
+                "episodes_watched": summary.total_episodes_watched,
+                "games_played": summary.total_games_played,
+            },
+            "favorite": favorite,
+            "channels": channels,
+            "activity": activity,
+            "suggestions": suggestions,
+        }
+
     def _admin_tiles(self) -> List[Channel]:
         """Every tile the admin browse grid shows: real channels, then game
         systems, in that order. Games are never part of self.lineup - see
@@ -869,9 +1000,11 @@ class TVApp:
     def _section_keys(self) -> List[str]:
         """Every browse row currently on screen, top to bottom: Continue
         Watching (only if it has anything in it), then Shows, then Games -
-        each only present if it isn't empty. This is recomputed on every
-        move rather than cached, since it's cheap and always needs to
-        reflect self._continue_entries's current contents anyway.
+        each only present if it isn't empty - then Insights, always present
+        as a single evergreen row at the bottom (UKE-29) regardless of
+        what's been watched yet. This is recomputed on every move rather
+        than cached, since it's cheap and always needs to reflect
+        self._continue_entries's current contents anyway.
         """
         keys = []
         if self._continue_entries:
@@ -880,11 +1013,14 @@ class TVApp:
             keys.append("shows")
         if self._section_tiles("games"):
             keys.append("games")
+        keys.append("insights")
         return keys
 
     def _current_section(self) -> str:
         if self._browse_continue_index is not None:
             return "continue"
+        if self._browse_on_insights:
+            return "insights"
         channel = self._channel_by_number(self._browse_number)
         if channel is not None and channel.config.kind == "game":
             return "games"
@@ -898,8 +1034,14 @@ class TVApp:
         """
         if key == "continue":
             self._browse_continue_index = 0
+            self._browse_on_insights = False
+            return
+        if key == "insights":
+            self._browse_continue_index = None
+            self._browse_on_insights = True
             return
         self._browse_continue_index = None
+        self._browse_on_insights = False
         tiles = self._section_tiles(key)
         if tiles:
             self._browse_number = tiles[0].number
@@ -973,11 +1115,26 @@ class TVApp:
         self._browse_number = self.lineup.current.number
         self._refresh_admin_panel()
 
+    def _confirm_insights_selection(self) -> None:
+        """Open the Insights view (UKE-29) - a passive read-only screen, so
+        unlike confirming a show/continue entry there's nothing to play and
+        no mpv/player interaction at all here.
+        """
+        self.admin_browsing = False
+        self.admin_insights_viewing = True
+        self._refresh_admin_panel()
+
     def _admin_back_to_shows(self) -> None:
         self.admin_episode_browsing = False
         self.admin_browsing = True
         self._browse_continue_index = None
         self._refresh_continue_entries()
+        self._refresh_admin_panel()
+
+    def _admin_back_from_insights(self) -> None:
+        self.admin_insights_viewing = False
+        self.admin_browsing = True
+        self._browse_on_insights = True  # land back on the Insights tile, not the grid's start
         self._refresh_admin_panel()
 
     def _move_episode_cursor(self, delta: int) -> None:

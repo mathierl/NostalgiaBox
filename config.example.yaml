@@ -169,7 +169,18 @@ input:
   stdin: false            # developer keyboard over the terminal
   # keyboard_name_filter: "remote"   # only listen to devices whose name matches
   # keyboard_devices: ["/dev/input/event0"]  # or pin exact devices
-  # keyboard_grab: false             # true = stop keystrokes leaking to console
+  keyboard_grab: true      # recommended on real hardware (see below)
+  # Without this, nostalgiabox reads the keyboard WITHOUT taking exclusive
+  # control of it - every keystroke also leaks through to whatever else is
+  # listening (e.g. a login console on the same physical keyboard). Since
+  # KEY_A is bound straight to admin_toggle with no hold needed, this is a
+  # real footgun: typing ordinary shell commands at that keyboard (anything
+  # with an "a" in it - "sudo systemctl restart nostalgiabox" alone has
+  # several) rapidly flips admin mode on/off underneath you, which can crash
+  # the box (confirmed on real hardware, UKE-29). Set this to false only if
+  # you deliberately want to keep using that keyboard for other things while
+  # the service is running - if so, stop the service first
+  # (`sudo systemctl stop nostalgiabox`) before typing at its console.
 
   # Map specific keys to actions (handy for odd remotes). Find a button's key
   # name with `sudo evtest`. Actions: channel_up, channel_down, volume_up,

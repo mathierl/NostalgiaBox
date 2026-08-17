@@ -7,6 +7,7 @@ from nostalgiabox.watch_state import (
     WATCHED_THRESHOLD,
     WatchState,
     continue_watching,
+    insights_summary,
 )
 from tests.helpers import make_show
 
@@ -254,3 +255,123 @@ def test_continue_watching_respects_limit(tmp_path):
 def test_continue_watching_with_no_watch_state_is_empty(tmp_path):
     lineup, _ = _lineup_with_games(tmp_path)
     assert continue_watching(list(lineup), None) == []
+
+
+# -- insights_summary() (UKE-29) ---------------------------------------------
+
+
+def test_insights_summary_with_no_watch_state_is_empty(tmp_path):
+    lineup, games = _lineup_with_games(tmp_path)
+    summary = insights_summary(list(lineup) + games, None)
+    assert summary.channels == []
+    assert summary.favorite is None
+    assert summary.activity == []
+    assert summary.total_watched_minutes == 0
+    assert summary.total_episodes_watched == 0
+    assert summary.total_games_played == 0
+
+
+def test_insights_summary_per_channel_counts(tmp_path):
+    lineup, games = _lineup_with_games(tmp_path, dragon_eps=3, arthur_eps=3, snes_roms=2)
+    ws = WatchState(tmp_path / "watch_state.json")
+    dragon = next(c for c in lineup if c.number == 2)
+    snes = games[0]
+    ws.mark_episode_watched(2, dragon.config.path, dragon.episodes[0], duration=600.0)
+    ws.record_episode_position(2, dragon.config.path, dragon.episodes[1], position=300.0, duration=600.0)
+    ws.record_game_played(snes.number, snes.config.path, snes.episodes[0])
+    ws.record_game_played(snes.number, snes.config.path, snes.episodes[0])  # played twice
+
+    summary = insights_summary(list(lineup) + games, ws)
+    dragon_insight = next(c for c in summary.channels if c.number == 2)
+    assert dragon_insight.watched_count == 1  # only the fully-watched one counts
+    assert dragon_insight.total_count == 3
+    assert dragon_insight.watched_minutes == 10 + 5  # 600s watched + 300s in-progress, in minutes
+    assert dragon_insight.play_count == 0
+
+    snes_insight = next(c for c in summary.channels if c.number == snes.number)
+    assert snes_insight.watched_count == 1  # one rom played at least once
+    assert snes_insight.watched_minutes is None  # no duration signal for games
+    assert snes_insight.play_count == 2
+
+
+def test_insights_summary_totals(tmp_path):
+    lineup, games = _lineup_with_games(tmp_path, dragon_eps=2, arthur_eps=2, snes_roms=1)
+    ws = WatchState(tmp_path / "watch_state.json")
+    dragon = next(c for c in lineup if c.number == 2)
+    arthur = next(c for c in lineup if c.number == 3)
+    snes = games[0]
+    ws.mark_episode_watched(2, dragon.config.path, dragon.episodes[0], duration=600.0)
+    ws.mark_episode_watched(3, arthur.config.path, arthur.episodes[0], duration=1200.0)
+    ws.record_game_played(snes.number, snes.config.path, snes.episodes[0])
+
+    summary = insights_summary(list(lineup) + games, ws)
+    assert summary.total_episodes_watched == 2
+    assert summary.total_watched_minutes == 10 + 20
+    assert summary.total_games_played == 1
+
+
+def test_insights_summary_favorite_is_most_watched_by_minutes(tmp_path):
+    lineup, _ = _lineup_with_games(tmp_path, dragon_eps=2, arthur_eps=2)
+    ws = WatchState(tmp_path / "watch_state.json")
+    dragon = next(c for c in lineup if c.number == 2)
+    arthur = next(c for c in lineup if c.number == 3)
+    ws.mark_episode_watched(2, dragon.config.path, dragon.episodes[0], duration=300.0)
+    ws.mark_episode_watched(3, arthur.config.path, arthur.episodes[0], duration=3000.0)  # much more watched
+
+    summary = insights_summary(list(lineup), ws)
+    assert summary.favorite is not None
+    assert summary.favorite.number == 3
+
+
+def test_insights_summary_favorite_uses_play_count_for_games(tmp_path):
+    lineup, games = _lineup_with_games(tmp_path, snes_roms=2)
+    ws = WatchState(tmp_path / "watch_state.json")
+    snes = games[0]
+    # No shows touched at all - the only "favorite" candidate is the game system.
+    ws.record_game_played(snes.number, snes.config.path, snes.episodes[0])
+    ws.record_game_played(snes.number, snes.config.path, snes.episodes[1])
+
+    summary = insights_summary(list(lineup) + games, ws)
+    assert summary.favorite is not None
+    assert summary.favorite.kind == "game"
+    assert summary.favorite.number == snes.number
+
+
+def test_insights_summary_untouched_channels_excluded_from_favorite(tmp_path):
+    lineup, _ = _lineup_with_games(tmp_path)
+    ws = WatchState(tmp_path / "watch_state.json")
+    # Nothing ever recorded - untouched channels must not "win" favorite by
+    # default (their watched_minutes/play_count would both be 0 too, but
+    # last_played == 0 is the actual exclusion signal).
+    summary = insights_summary(list(lineup), ws)
+    assert summary.favorite is None
+
+
+def test_insights_summary_activity_sorted_most_recent_first_and_limited(tmp_path):
+    lineup, _ = _lineup_with_games(tmp_path, dragon_eps=3, arthur_eps=3)
+    ws = WatchState(tmp_path / "watch_state.json")
+    dragon = next(c for c in lineup if c.number == 2)
+    arthur = next(c for c in lineup if c.number == 3)
+    ws.record_episode_position(2, dragon.config.path, dragon.episodes[0], position=100.0, duration=1000.0)
+    ws.record_episode_position(3, arthur.config.path, arthur.episodes[0], position=100.0, duration=1000.0)
+    ws.record_episode_position(2, dragon.config.path, dragon.episodes[1], position=100.0, duration=1000.0)
+
+    summary = insights_summary(list(lineup), ws, activity_limit=2)
+    assert len(summary.activity) == 2
+    assert summary.activity[0].channel_number == 2  # dragon episode 2 recorded last
+    assert summary.activity[0].watched is False  # still in progress, not watched
+
+    full = insights_summary(list(lineup), ws, activity_limit=10)
+    assert len(full.activity) == 3
+
+
+def test_insights_summary_activity_includes_games(tmp_path):
+    lineup, games = _lineup_with_games(tmp_path, snes_roms=1)
+    ws = WatchState(tmp_path / "watch_state.json")
+    snes = games[0]
+    ws.record_game_played(snes.number, snes.config.path, snes.episodes[0])
+
+    summary = insights_summary(list(lineup) + games, ws)
+    assert len(summary.activity) == 1
+    assert summary.activity[0].kind == "game"
+    assert summary.activity[0].watched is True

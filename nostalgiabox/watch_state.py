@@ -129,6 +129,158 @@ def continue_watching(
     return entries[:limit]
 
 
+@dataclass(frozen=True)
+class ChannelInsight:
+    """One channel's/game system's rolled-up stats for the admin Insights
+    view (UKE-29).
+
+    ``watched_minutes`` is best-effort and shows-only: RetroArch gives no
+    duration/position signal for a game (see the module docstring), so a
+    game channel's minutes are always ``None`` rather than a misleading 0 -
+    ``play_count`` is the honest signal for games instead.
+    """
+
+    number: int
+    name: str
+    kind: str  # "show" or "game", matches Channel.config.kind
+    watched_count: int  # episodes watched (shows) / roms played at least once (games)
+    total_count: int
+    watched_minutes: Optional[int]
+    play_count: int  # games only; always 0 for shows
+    last_played: float  # unix timestamp, 0.0 if never touched
+
+
+@dataclass(frozen=True)
+class ActivityEntry:
+    """One row of the Insights view's recent-activity log (UKE-29), most
+    recent first - a simple "what got watched/played, and when" feed built
+    from the same last_played timestamps everything else here already
+    tracks, not a separate event log.
+    """
+
+    channel_number: int
+    channel_name: str
+    kind: str
+    title: str
+    when: float  # unix timestamp
+    watched: bool  # shows: fully watched vs. still in-progress; games: always True
+
+
+@dataclass(frozen=True)
+class InsightsSummary:
+    """Everything the admin Insights screen needs, computed fresh each time
+    it's opened (see TVApp._insights_snapshot) - cheap enough (in-memory
+    dict lookups over however many channels/episodes exist) that there's no
+    need to cache or incrementally maintain it, same tradeoff as
+    continue_watching().
+    """
+
+    channels: List[ChannelInsight]
+    favorite: Optional[ChannelInsight]
+    activity: List[ActivityEntry]
+    total_watched_minutes: int
+    total_episodes_watched: int
+    total_games_played: int
+
+
+def insights_summary(
+    channels: Sequence[Channel], watch_state: Optional["WatchState"], *, activity_limit: int = 20
+) -> InsightsSummary:
+    """Roll up per-channel stats, an overall "favorite", and a recent-
+    activity feed across every real channel and game system. ``channels`` is
+    real channels + game systems combined (see TVApp._admin_tiles), same as
+    continue_watching().
+    """
+    if watch_state is None:
+        return InsightsSummary(
+            channels=[], favorite=None, activity=[],
+            total_watched_minutes=0, total_episodes_watched=0, total_games_played=0,
+        )
+
+    per_channel: List[ChannelInsight] = []
+    activity: List[ActivityEntry] = []
+    total_minutes = 0
+    total_episodes_watched = 0
+    total_games_played = 0
+
+    for channel in channels:
+        is_game = channel.config.kind == "game"
+        total_count = len(channel.episodes)
+        watched_count = 0
+        minutes = 0
+        play_count = 0
+        last_played = 0.0
+
+        for item_path in channel.episodes:
+            if is_game:
+                gstate = watch_state.game_state(channel.number, channel.config.path, item_path)
+                if gstate.played:
+                    watched_count += 1
+                play_count += gstate.play_count
+                if gstate.last_played:
+                    last_played = max(last_played, gstate.last_played)
+                    activity.append(
+                        ActivityEntry(
+                            channel_number=channel.number, channel_name=channel.name,
+                            kind="game", title=episode_title(item_path),
+                            when=gstate.last_played, watched=True,
+                        )
+                    )
+            else:
+                estate = watch_state.episode_state(channel.number, channel.config.path, item_path)
+                if estate.watched:
+                    watched_count += 1
+                    if estate.duration:
+                        minutes += round(estate.duration / 60)
+                elif estate.in_progress:
+                    minutes += round(estate.position / 60)
+                if estate.last_played:
+                    last_played = max(last_played, estate.last_played)
+                    activity.append(
+                        ActivityEntry(
+                            channel_number=channel.number, channel_name=channel.name,
+                            kind="show", title=episode_title(item_path),
+                            when=estate.last_played, watched=estate.watched,
+                        )
+                    )
+
+        per_channel.append(
+            ChannelInsight(
+                number=channel.number, name=channel.name, kind=channel.config.kind,
+                watched_count=watched_count, total_count=total_count,
+                watched_minutes=None if is_game else minutes,
+                play_count=play_count, last_played=last_played,
+            )
+        )
+        if is_game:
+            total_games_played += play_count
+        else:
+            total_minutes += minutes
+            total_episodes_watched += watched_count
+
+    activity.sort(key=lambda a: a.when, reverse=True)
+    # "Favorite" is whichever channel has the most engagement in its own
+    # terms (watched minutes for shows, play count for games) - comparing
+    # those two units directly wouldn't mean much, but picking the max of
+    # "the number that matters for this channel's kind" across everything
+    # touched at least once is a reasonable single answer.
+    touched = [c for c in per_channel if c.last_played > 0]
+    favorite = max(
+        touched,
+        key=lambda c: c.play_count if c.kind == "game" else (c.watched_minutes or 0),
+        default=None,
+    )
+
+    return InsightsSummary(
+        channels=per_channel,
+        favorite=favorite,
+        activity=activity[:activity_limit],
+        total_watched_minutes=total_minutes,
+        total_episodes_watched=total_episodes_watched,
+        total_games_played=total_games_played,
+    )
+
+
 class WatchState:
     """In-memory watch state, loaded from and saved back to a JSON file.
 
@@ -254,6 +406,10 @@ __all__ = [
     "GameState",
     "ContinueEntry",
     "continue_watching",
+    "ChannelInsight",
+    "ActivityEntry",
+    "InsightsSummary",
+    "insights_summary",
     "STATE_SUBDIR",
     "STATE_FILENAME",
     "WATCHED_THRESHOLD",

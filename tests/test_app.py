@@ -338,9 +338,15 @@ def test_admin_toggle_opens_show_grid(tmp_path):
 
     snapshot = app._admin_state_snapshot()
     assert snapshot["mode"] == "grid"
-    names = [t["name"] for s in snapshot["sections"] for t in s["tiles"]]
+    # Insights (UKE-29) is always present too, as its own evergreen row at
+    # the end - excluded here since it isn't a real channel with an
+    # episode-count label.
+    show_sections = [s for s in snapshot["sections"] if s["kind"] != "insights"]
+    names = [t["name"] for s in show_sections for t in s["tiles"]]
     assert names == ["Dragon Tales", "Arthur", "Rugrats"]
-    assert all(t["count_label"] == "4 eps" for s in snapshot["sections"] for t in s["tiles"])
+    assert all(t["count_label"] == "4 eps" for s in show_sections for t in s["tiles"])
+    insights_section = next(s for s in snapshot["sections"] if s["kind"] == "insights")
+    assert insights_section["tiles"][0]["name"] == "Watch Insights"
 
 
 def test_admin_toggle_off_by_default_mute_still_mutes(tmp_path):
@@ -525,6 +531,102 @@ def test_power_backs_out_of_episode_list_to_grid(tmp_path):
     assert app.admin_browsing
     assert not app.standby  # power backed out, it did not toggle standby
     assert app._admin_state_snapshot()["mode"] == "grid"
+
+
+# -- Insights view (UKE-29) --------------------------------------------------
+
+
+def _walk_to_insights(app):
+    """Move the cursor from wherever the grid opens down to the Insights
+    row - it's always the bottommost row (see _section_keys), so Channel
+    Down enough times always gets there regardless of what else is on
+    screen.
+    """
+    for _ in range(6):
+        if app._current_section() == "insights":
+            return
+        send(app, Action.CHANNEL_DOWN)
+    raise AssertionError("never reached the insights row")
+
+
+def test_confirming_insights_opens_it_with_no_player_interaction(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    player_current_before = player.current  # whatever app.start() tuned to
+    send(app, Action.ADMIN_TOGGLE)
+    _walk_to_insights(app)
+    send(app, Action.MUTE)  # confirm
+
+    assert not app.admin_browsing
+    assert app.admin_insights_viewing
+    assert app.admin_mode  # still in admin mode overall
+    # Purely a read-only screen - nothing new was ever asked to play.
+    assert player.current == player_current_before
+
+    snapshot = app._admin_state_snapshot()
+    assert snapshot["mode"] == "insights"
+    assert "totals" in snapshot["insights"]
+
+
+def test_power_backs_out_of_insights_to_grid_on_the_insights_tile(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    _walk_to_insights(app)
+    send(app, Action.MUTE)
+    assert app.admin_insights_viewing
+
+    send(app, Action.POWER)
+    assert not app.admin_insights_viewing
+    assert app.admin_browsing
+    assert not app.standby  # backed out, did not toggle standby
+    assert app._current_section() == "insights"  # landed back on the same tile
+    assert app._admin_state_snapshot()["mode"] == "grid"
+
+
+def test_admin_toggle_exits_directly_from_insights(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    _walk_to_insights(app)
+    send(app, Action.MUTE)
+    send(app, Action.ADMIN_TOGGLE)  # long-press exits from anywhere
+    assert not app.admin_mode
+    assert not app.admin_insights_viewing
+
+
+def test_insights_snapshot_reflects_watched_totals(tmp_path):
+    ws = WatchState(tmp_path / "watch_state.json")
+    app, player, _ = build_app(tmp_path, watch_state=ws)
+    app.start()
+    channel = next(c for c in app.lineup if c.number == 2)
+    ws.mark_episode_watched(2, channel.config.path, channel.episodes[0], duration=600.0)
+
+    send(app, Action.ADMIN_TOGGLE)
+    _walk_to_insights(app)
+    send(app, Action.MUTE)
+
+    data = app._admin_state_snapshot()["insights"]
+    assert data["totals"]["episodes_watched"] == 1
+    assert data["totals"]["watched_minutes"] == 10
+    assert data["favorite"]["name"] == "Dragon Tales"
+    names = [c["name"] for c in data["channels"]]
+    assert "Dragon Tales" in names
+    assert len(data["activity"]) == 1
+    assert data["activity"][0]["channel_name"] == "Dragon Tales"
+
+
+def test_insights_snapshot_with_nothing_watched_is_empty_but_valid(tmp_path):
+    app, player, _ = build_app(tmp_path)
+    app.start()
+    send(app, Action.ADMIN_TOGGLE)
+    _walk_to_insights(app)
+    send(app, Action.MUTE)
+
+    data = app._admin_state_snapshot()["insights"]
+    assert data["totals"] == {"watched_minutes": 0, "episodes_watched": 0, "games_played": 0}
+    assert data["favorite"] is None
+    assert data["activity"] == []
 
 
 def test_admin_toggle_exits_directly_from_episode_list(tmp_path):
@@ -1138,7 +1240,9 @@ def test_channel_down_walks_through_every_present_section(tmp_path):
     app.start()
     _seed_in_progress(app, ws, 3)
     send(app, Action.ADMIN_TOGGLE)
-    assert app._section_keys() == ["continue", "shows", "games"]
+    # Insights (UKE-29) is always present too, as its own evergreen row at
+    # the very end.
+    assert app._section_keys() == ["continue", "shows", "games", "insights"]
     assert app._current_section() == "shows"  # opening always lands on the grid, not the row
 
     send(app, Action.CHANNEL_UP)
@@ -1153,7 +1257,9 @@ def test_channel_down_walks_through_every_present_section(tmp_path):
     assert app._current_section() == "games"
     assert app._browse_number == 5  # SNES, the games row's first (only) tile
     send(app, Action.CHANNEL_DOWN)
-    assert app._current_section() == "games"  # bottommost row - nowhere further down
+    assert app._current_section() == "insights"
+    send(app, Action.CHANNEL_DOWN)
+    assert app._current_section() == "insights"  # bottommost row - nowhere further down
 
 
 def test_volume_wraps_within_the_games_row(tmp_path):
